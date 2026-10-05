@@ -4,7 +4,11 @@ data/
 *.sqlite
 *.sqlite3
 
-# Python virtual environment & cache
+# Ignore backend Python scripts and environments so Vercel only serves static web interface
+*.py
+requirements.txt
+src/
+scripts/
 .venv/
 venv/
 env/

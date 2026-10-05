@@ -1,6 +1,9 @@
 {
   "version": 2,
+  "framework": null,
   "outputDirectory": "web",
+  "buildCommand": "",
+  "installCommand": "",
   "cleanUrls": true,
   "rewrites": [
     { "source": "/static/:path*", "destination": "/:path*" }
