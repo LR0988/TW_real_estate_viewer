@@ -25,6 +25,7 @@ const STATE = {
   geojsonLayer: null,
   markersLayer: null,
   chart: null,
+  desktopBackendUrl: '',
   colorConfig: {
     autoScale: true,
     palette: 'cool_blues',
@@ -34,6 +35,26 @@ const STATE = {
     customMax: null,
   },
 };
+
+const SUPABASE_CONFIG = {
+  url: 'https://pwvhmsslyzwmcueqwljb.supabase.co',
+  anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3dmhtc3NseXp3bWN1ZXF3bGpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyMTE0OTMsImV4cCI6MjEwNjc4NzQ5M30.uk5Swq9XNwAzT-8ZWsEwerNkfyDQhOTRGxcfB4BgypE'
+};
+
+const DEFAULT_DESKTOP_TUNNEL = 'https://nonpersuadable-unequilaterally-ezra.ngrok-free.dev';
+
+// API Fetch Helper targeting Desktop Backend with ngrok header bypass
+async function apiFetch(path, options = {}) {
+  const base = (STATE.desktopBackendUrl || '').replace(/\/+$/, '');
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const fullUrl = path.startsWith('http://') || path.startsWith('https://') ? path : `${base}${cleanPath}`;
+  const opts = { ...options };
+  opts.headers = {
+    'ngrok-skip-browser-warning': 'true',
+    ...(opts.headers || {})
+  };
+  return fetch(fullUrl, opts);
+}
 
 const COLOR_PALETTES = {
   momentum_tw: {
@@ -189,15 +210,225 @@ const BASEMAP_TILES = {
   }
 };
 
-// Initialize Application
-document.addEventListener('DOMContentLoaded', async () => {
-  lucide.createIcons();
-  initMap();
-  initChart();
-  bindEvents();
+// Auth & Desktop Helpers
+function getStoredAuth() {
+  try {
+    const raw = localStorage.getItem('tw_re_auth');
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function checkIsAuthenticated() {
+  const auth = getStoredAuth();
+  return !!(auth && auth.user);
+}
+
+async function initAppData() {
   await loadRegions();
   await loadPeriods();
   await loadCrawlerStatus();
+}
+
+function initAuthAndDesktop() {
+  // 1. Initialize Desktop Backend URL
+  const savedDesktopUrl = localStorage.getItem('tw_re_desktop_url');
+  const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  
+  if (savedDesktopUrl !== null) {
+    STATE.desktopBackendUrl = savedDesktopUrl;
+  } else if (!isLocalHost) {
+    STATE.desktopBackendUrl = DEFAULT_DESKTOP_TUNNEL;
+  } else {
+    STATE.desktopBackendUrl = '';
+  }
+
+  const backendInput = document.getElementById('desktop-backend-input');
+  if (backendInput) backendInput.value = STATE.desktopBackendUrl;
+
+  // 2. Auth State Check
+  const authModal = document.getElementById('auth-modal');
+  const authForm = document.getElementById('auth-form');
+  const authErrorMsg = document.getElementById('auth-error-msg');
+  const currentUserName = document.getElementById('current-user-name');
+  const btnLogout = document.getElementById('btn-logout');
+
+  if (checkIsAuthenticated()) {
+    const auth = getStoredAuth();
+    if (authModal) authModal.classList.add('hidden');
+    if (currentUserName) currentUserName.innerText = auth.user;
+  } else {
+    if (authModal) authModal.classList.remove('hidden');
+  }
+
+  if (authForm) {
+    authForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (authErrorMsg) authErrorMsg.classList.add('hidden');
+      const submitBtn = document.getElementById('btn-auth-submit');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerText = '驗證中...';
+      }
+
+      const username = document.getElementById('auth-username').value.trim();
+      const password = document.getElementById('auth-password').value.trim();
+
+      let loginSuccess = false;
+      let token = 'token_' + Date.now();
+
+      // Check credentials: username hotpotlu or hotpotlu@gmail.com, password qQ!096306771
+      if ((username === 'hotpotlu' || username === 'hotpotlu@gmail.com') && password === 'qQ!096306771') {
+        loginSuccess = true;
+      }
+
+      // Also attempt Supabase Auth endpoint
+      try {
+        const supabaseRes = await fetch(`${SUPABASE_CONFIG.url}/auth/v1/token?grant_type=password`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': SUPABASE_CONFIG.anonKey
+          },
+          body: JSON.stringify({
+            email: username.includes('@') ? username : `${username}@gmail.com`,
+            password: password
+          })
+        });
+        const supabaseData = await supabaseRes.json();
+        if (supabaseRes.ok && supabaseData.access_token) {
+          loginSuccess = true;
+          token = supabaseData.access_token;
+        }
+      } catch (err) {
+        console.warn('Supabase auth network ping:', err);
+      }
+
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i data-lucide="log-in" class="w-4 h-4"></i><span>登入系統</span>';
+        if (window.lucide) lucide.createIcons();
+      }
+
+      if (loginSuccess) {
+        const displayUser = username.split('@')[0];
+        localStorage.setItem('tw_re_auth', JSON.stringify({
+          user: displayUser,
+          token: token,
+          timestamp: Date.now()
+        }));
+        if (authModal) authModal.classList.add('hidden');
+        if (currentUserName) currentUserName.innerText = displayUser;
+        showToast('登入成功，系統已就緒');
+        await initAppData();
+      } else {
+        if (authErrorMsg) authErrorMsg.classList.remove('hidden');
+      }
+    });
+  }
+
+  if (btnLogout) {
+    btnLogout.addEventListener('click', () => {
+      localStorage.removeItem('tw_re_auth');
+      if (authModal) authModal.classList.remove('hidden');
+      showToast('已登出系統');
+    });
+  }
+
+  // 3. Desktop Connection Modal & Controls
+  const desktopModal = document.getElementById('desktop-modal');
+  const btnDesktopConn = document.getElementById('btn-desktop-connection');
+  const btnCloseDesktopModal = document.getElementById('btn-close-desktop-modal');
+  const btnTestConn = document.getElementById('btn-test-desktop-connection');
+  const btnSaveConn = document.getElementById('btn-save-desktop-connection');
+
+  if (btnDesktopConn) {
+    btnDesktopConn.addEventListener('click', () => {
+      if (backendInput) backendInput.value = STATE.desktopBackendUrl;
+      if (desktopModal) desktopModal.classList.remove('hidden');
+    });
+  }
+  if (btnCloseDesktopModal) {
+    btnCloseDesktopModal.addEventListener('click', () => {
+      if (desktopModal) desktopModal.classList.add('hidden');
+    });
+  }
+
+  const pingDesktop = async (targetUrl) => {
+    try {
+      const url = (targetUrl !== undefined ? targetUrl : STATE.desktopBackendUrl).replace(/\/+$/, '');
+      const testEndpoint = (url || '') + '/api/crawler/status';
+      const res = await fetch(testEndpoint, {
+        headers: { 'ngrok-skip-browser-warning': 'true' }
+      });
+      return res.ok;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const updateDesktopStatusUI = (isOnline) => {
+    const dot = document.getElementById('desktop-status-dot');
+    const text = document.getElementById('desktop-status-text');
+    const modalStatus = document.getElementById('desktop-modal-status');
+
+    if (dot) dot.className = `w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400' : 'bg-rose-500'}`;
+    if (text) text.innerText = isOnline ? 'Desktop 已連線' : 'Desktop 離線';
+    if (modalStatus) {
+      modalStatus.className = `inline-flex items-center gap-1.5 font-semibold ${isOnline ? 'text-emerald-400' : 'text-rose-400'}`;
+      modalStatus.innerHTML = `<span class="w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}"></span>${isOnline ? '連線正常 (Active)' : '連線失敗 (Offline)'}`;
+    }
+  };
+
+  if (btnTestConn) {
+    btnTestConn.addEventListener('click', async () => {
+      btnTestConn.disabled = true;
+      btnTestConn.innerHTML = '<i data-lucide="loader" class="w-3.5 h-3.5 animate-spin"></i><span>測試中...</span>';
+      const testUrl = (backendInput ? backendInput.value.trim() : '');
+      const ok = await pingDesktop(testUrl);
+      btnTestConn.disabled = false;
+      btnTestConn.innerHTML = '<i data-lucide="activity" class="w-3.5 h-3.5"></i><span>測試連線</span>';
+      if (window.lucide) lucide.createIcons();
+      updateDesktopStatusUI(ok);
+      if (ok) {
+        showToast('連線測試成功！已連通本機 Desktop 伺服器');
+      } else {
+        showToast('連線測試失敗，請確認 ngrok 或本機伺服器是否開啟');
+      }
+    });
+  }
+
+  if (btnSaveConn) {
+    btnSaveConn.addEventListener('click', async () => {
+      const newUrl = backendInput ? backendInput.value.trim().replace(/\/+$/, '') : '';
+      STATE.desktopBackendUrl = newUrl;
+      localStorage.setItem('tw_re_desktop_url', newUrl);
+      if (desktopModal) desktopModal.classList.add('hidden');
+      showToast('已更新 Desktop 連線網址，正在重新載入資料...');
+      const ok = await pingDesktop(newUrl);
+      updateDesktopStatusUI(ok);
+      if (checkIsAuthenticated()) {
+        await initAppData();
+      }
+    });
+  }
+
+  // Initial desktop check
+  pingDesktop().then(updateDesktopStatusUI);
+}
+
+// Initialize Application
+document.addEventListener('DOMContentLoaded', async () => {
+  if (window.lucide) lucide.createIcons();
+  initAuthAndDesktop();
+  initMap();
+  initChart();
+  bindEvents();
+  if (checkIsAuthenticated()) {
+    await initAppData();
+  }
 });
 
 // 1. Map Initialization
@@ -270,7 +501,7 @@ function setBasemap(type) {
 // 1b. Load Region Hierarchy (Counties & Districts)
 async function loadRegions() {
   try {
-    const res = await fetch('/api/regions');
+    const res = await apiFetch('/api/regions');
     const data = await res.json();
     STATE.regionTree = data.regions || {};
 
@@ -343,7 +574,7 @@ function syncRegionDropdowns(selectedRegion) {
 // 2. Load Available Periods
 async function loadPeriods() {
   try {
-    const res = await fetch('/api/periods');
+    const res = await apiFetch('/api/periods');
     const data = await res.json();
     STATE.periods = data.periods || [];
 
@@ -619,7 +850,7 @@ async function updateView() {
   try {
     // Determine level for base boundaries
     const fetchLevel = STATE.activeLevel === 'road' ? 'town' : STATE.activeLevel;
-    const res = await fetch(`/api/map/data?level=${fetchLevel}${getTimeParams()}${getAgeParams()}`);
+    const res = await apiFetch(`/api/map/data?level=${fetchLevel}${getTimeParams()}${getAgeParams()}`);
     const geojsonData = await res.json();
 
     // Compute dynamic color auto-scaling if enabled
@@ -796,7 +1027,7 @@ async function renderLocationHotspots(geojsonData, period) {
       STATE.markersLayer.clearLayers();
     }
 
-    const res = await fetch(url);
+    const res = await apiFetch(url);
     const data = await res.json();
     const hotspots = data.hotspots || [];
 
@@ -1049,7 +1280,7 @@ async function selectRegion(regionName, layer = null) {
 async function loadRegionDetail(level, name) {
   const currentPeriod = STATE.periods[STATE.currentIndex];
   try {
-    const res = await fetch(`/api/trends?level=${level}&name=${encodeURIComponent(name)}${getAgeParams()}`);
+    const res = await apiFetch(`/api/trends?level=${level}&name=${encodeURIComponent(name)}${getAgeParams()}`);
     const data = await res.json();
     const series = data.series || [];
 
@@ -1095,7 +1326,7 @@ async function loadRegionDetail(level, name) {
 // 8. Load National Summary
 async function loadNationalSummary() {
   try {
-    const res = await fetch(`/api/summary?${getTimeParams().replace(/^&/, '')}${getAgeParams()}`);
+    const res = await apiFetch(`/api/summary?${getTimeParams().replace(/^&/, '')}${getAgeParams()}`);
     const summary = await res.json();
 
     document.getElementById('aside-level-badge').innerText = '全國總覽';
@@ -1302,7 +1533,7 @@ function updateTrendChart(series, title) {
 
 async function loadHistoricalTrend(level, name) {
   try {
-    const res = await fetch(`/api/trends?level=${level}&name=${encodeURIComponent(name)}${getAgeParams()}`);
+    const res = await apiFetch(`/api/trends?level=${level}&name=${encodeURIComponent(name)}${getAgeParams()}`);
     const data = await res.json();
     updateTrendChart(data.series || [], name);
   } catch (err) {
@@ -1315,7 +1546,7 @@ async function loadRanking() {
   const metricSelect = document.getElementById('select-ranking-metric').value;
   const levelParam = STATE.activeLevel === 'road' ? 'town' : STATE.activeLevel;
   try {
-    const res = await fetch(`/api/ranking?metric=${metricSelect}&level=${levelParam}&limit=10${getTimeParams()}${getAgeParams()}`);
+    const res = await apiFetch(`/api/ranking?metric=${metricSelect}&level=${levelParam}&limit=10${getTimeParams()}${getAgeParams()}`);
     const data = await res.json();
     const ranking = data.ranking || [];
 
@@ -1364,7 +1595,7 @@ async function loadRanking() {
 async function loadTopRoads(region) {
   const container = document.getElementById('roads-list');
   try {
-    const res = await fetch(`/api/roads?limit=20${getTimeParams()}${getAgeParams()}${region ? `&region=${encodeURIComponent(region)}` : ''}`);
+    const res = await apiFetch(`/api/roads?limit=20${getTimeParams()}${getAgeParams()}${region ? `&region=${encodeURIComponent(region)}` : ''}`);
     const data = await res.json();
     const roads = data.roads || [];
 
@@ -1424,7 +1655,7 @@ async function loadTopRoads(region) {
 async function loadTopProjects(region) {
   const container = document.getElementById('projects-list');
   try {
-    const res = await fetch(`/api/projects?limit=25${getTimeParams()}${getAgeParams()}${region ? `&region=${encodeURIComponent(region)}` : ''}`);
+    const res = await apiFetch(`/api/projects?limit=25${getTimeParams()}${getAgeParams()}${region ? `&region=${encodeURIComponent(region)}` : ''}`);
     const data = await res.json();
     const projects = data.projects || [];
 
@@ -1539,7 +1770,7 @@ async function fetchAndRenderTransactions(period, region, road, project, door) {
   else if (ageFilter === '30-999') url += '&min_age=30.001';
 
   try {
-    const res = await fetch(url);
+    const res = await apiFetch(url);
     const data = await res.json();
     const items = data.items || [];
     document.getElementById('tx-modal-count').innerText = `${data.total.toLocaleString()} 筆`;
@@ -1624,7 +1855,7 @@ async function fetchAndRenderTransactions(period, region, road, project, door) {
 // 14. Crawler Status
 async function loadCrawlerStatus() {
   try {
-    const res = await fetch('/api/crawler/status');
+    const res = await apiFetch('/api/crawler/status');
     const data = await res.json();
 
     document.getElementById('stat-total-tx').innerText = data.total_transactions.toLocaleString();
@@ -2103,7 +2334,7 @@ function bindEvents() {
     showToast(`🔍 正在精確搜尋與定位：${query}...`);
 
     try {
-      const res = await fetch(`/api/search/locate?q=${encodeURIComponent(query)}`);
+      const res = await apiFetch(`/api/search/locate?q=${encodeURIComponent(query)}`);
       const data = await res.json();
       if (!data.found && data.total_tx === 0) {
         showToast(`查無符合「${query}」之交易或地理位置`);
@@ -2211,7 +2442,7 @@ function bindEvents() {
     showToast('正在向內政部實價登錄下載並解析最新批次...');
 
     try {
-      const res = await fetch('/api/crawler/crawl_latest', { method: 'POST' });
+      const res = await apiFetch('/api/crawler/crawl_latest', { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
         showToast('最新資料抓取作業已在背景啟動！');
@@ -2248,7 +2479,7 @@ function bindEvents() {
 
     try {
       const url = `/api/crawler/backfill?start_season=${start}${end ? `&end_season=${end}` : ''}`;
-      const res = await fetch(url, { method: 'POST' });
+      const res = await apiFetch(url, { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
         showToast('歷史補齊作業已在背景啟動！可於終端機查看實時進度。');

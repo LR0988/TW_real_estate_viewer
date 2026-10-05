@@ -84,6 +84,12 @@
         <div>最新資料: <span id="stat-latest-date" class="font-semibold text-emerald-400">--</span></div>
       </div>
 
+      <button id="btn-desktop-connection" class="flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition" title="本機 Desktop 連線設定">
+        <span class="w-2 h-2 rounded-full bg-emerald-400" id="desktop-status-dot"></span>
+        <i data-lucide="laptop" class="w-3.5 h-3.5 text-slate-300"></i>
+        <span id="desktop-status-text">Desktop 連線</span>
+      </button>
+
       <button id="btn-crawl-latest" class="flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition shadow-sm">
         <i data-lucide="refresh-cw" class="w-3.5 h-3.5" id="crawl-spinner"></i>
         <span>抓取最新發布</span>
@@ -93,6 +99,17 @@
         <i data-lucide="database" class="w-3.5 h-3.5"></i>
         <span>歷史補齊管理</span>
       </button>
+
+      <!-- User Auth Badge & Logout -->
+      <div id="user-auth-badge" class="flex items-center space-x-2 pl-2 border-l border-slate-800">
+        <div class="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700/60 text-xs text-slate-200">
+          <i data-lucide="shield-check" class="w-3.5 h-3.5 text-emerald-400"></i>
+          <span class="font-medium" id="current-user-name">hotpotlu</span>
+        </div>
+        <button id="btn-logout" class="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition" title="登出系統">
+          <i data-lucide="log-out" class="w-4 h-4"></i>
+        </button>
+      </div>
     </div>
   </header>
 
@@ -655,6 +672,110 @@
           </button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Desktop Connection Settings Modal -->
+  <div id="desktop-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[99999] hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative">
+      <button id="btn-close-desktop-modal" class="absolute top-4 right-4 text-slate-400 hover:text-white">
+        <i data-lucide="x" class="w-5 h-5"></i>
+      </button>
+
+      <div class="flex items-center space-x-3 mb-4">
+        <div class="w-10 h-10 rounded-xl bg-emerald-600/20 text-emerald-400 flex items-center justify-center">
+          <i data-lucide="laptop" class="w-6 h-6"></i>
+        </div>
+        <div>
+          <h3 class="text-base font-bold text-white">Desktop 邊緣伺服器連線設定</h3>
+          <p class="text-xs text-slate-400">Vercel 雲端介面 ↔ 本機實價登錄資料庫 (3.7GB) 連線</p>
+        </div>
+      </div>
+
+      <div class="space-y-4 text-xs">
+        <div class="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-2">
+          <div class="flex justify-between items-center text-slate-400">
+            <span>連線狀態:</span>
+            <span class="inline-flex items-center gap-1.5 font-semibold text-emerald-400" id="desktop-modal-status">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              連線正常 (Active)
+            </span>
+          </div>
+          <div class="flex justify-between text-slate-400">
+            <span>本機資料庫:</span>
+            <span class="font-mono text-slate-300">data/real_estate.db (~3.7GB)</span>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-slate-300 font-medium mb-1.5">Desktop Backend API 網址 (ngrok / Cloudflare Tunnel / 本機 URL)</label>
+          <input type="text" id="desktop-backend-input" placeholder="https://....ngrok-free.dev" class="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg px-3.5 py-2 text-xs text-white font-mono outline-none transition">
+          <p class="text-[11px] text-slate-500 mt-1">若於本機開啟，留空即可使用本機網域；若於 Vercel 雲端開啟，請填寫 ngrok 或本機穿透 URL。</p>
+        </div>
+
+        <div class="flex gap-2 pt-2">
+          <button id="btn-test-desktop-connection" class="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium rounded-lg transition flex items-center justify-center gap-1.5">
+            <i data-lucide="activity" class="w-3.5 h-3.5"></i>
+            <span>測試連線</span>
+          </button>
+          <button id="btn-save-desktop-connection" class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-lg transition shadow flex items-center justify-center gap-1.5">
+            <i data-lucide="check" class="w-3.5 h-3.5"></i>
+            <span>儲存設定</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Authentication Full-Screen Modal -->
+  <div id="auth-modal" class="fixed inset-0 bg-slate-950/95 backdrop-blur-xl z-[999999] flex items-center justify-center p-4">
+    <div class="bg-slate-900/90 border border-slate-800 rounded-3xl max-w-md w-full p-8 shadow-2xl relative overflow-hidden">
+      <!-- Glow background accent -->
+      <div class="absolute -top-24 -left-24 w-52 h-52 bg-blue-600/20 rounded-full blur-3xl pointer-events-none"></div>
+      <div class="absolute -bottom-24 -right-24 w-52 h-52 bg-emerald-600/20 rounded-full blur-3xl pointer-events-none"></div>
+
+      <div class="relative z-10 text-center mb-6">
+        <div class="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-blue-500/20 mb-3 text-white">
+          <i data-lucide="lock" class="w-7 h-7"></i>
+        </div>
+        <h2 class="text-xl font-bold text-white tracking-wide">台灣不動產實價登錄觀測站</h2>
+        <p class="text-xs text-slate-400 mt-1">Vercel Web 雲端決策平台 · 身分驗證</p>
+      </div>
+
+      <form id="auth-form" class="relative z-10 space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-300 mb-1.5">使用者帳號</label>
+          <div class="relative">
+            <i data-lucide="user" class="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
+            <input type="text" id="auth-username" value="hotpotlu" required placeholder="請輸入帳號 (hotpotlu)" class="w-full bg-slate-950/80 border border-slate-800 focus:border-blue-500 rounded-xl pl-10 pr-3.5 py-2.5 text-xs text-white placeholder-slate-500 outline-none transition">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-slate-300 mb-1.5">存取密碼</label>
+          <div class="relative">
+            <i data-lucide="key-round" class="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
+            <input type="password" id="auth-password" required placeholder="請輸入密碼" class="w-full bg-slate-950/80 border border-slate-800 focus:border-blue-500 rounded-xl pl-10 pr-3.5 py-2.5 text-xs text-white placeholder-slate-500 outline-none transition">
+          </div>
+        </div>
+
+        <div id="auth-error-msg" class="hidden text-xs text-rose-400 bg-rose-950/40 border border-rose-900/50 rounded-xl p-2.5 text-center">
+          帳號或密碼錯誤，請重新輸入
+        </div>
+
+        <button type="submit" id="btn-auth-submit" class="w-full py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold rounded-xl text-xs transition shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2">
+          <i data-lucide="log-in" class="w-4 h-4"></i>
+          <span>登入系統</span>
+        </button>
+
+        <div class="pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+          <div class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+            <span>Supabase Auth API 整合</span>
+          </div>
+          <span class="font-mono text-slate-400">Project: pwvhmss...</span>
+        </div>
+      </form>
     </div>
   </div>
 
