@@ -279,8 +279,8 @@ function initAuthAndDesktop() {
       let loginSuccess = false;
       let token = 'token_' + Date.now();
 
-      // Check credentials: username hotpotlu or hotpotlu@gmail.com, password qQ!096306771
-      if ((username === 'hotpotlu' || username === 'hotpotlu@gmail.com') && password === 'qQ!096306771') {
+      // Check credentials: username hotpotlu or hotpotlu@gmail.com, password qQ!0963067171
+      if ((username === 'hotpotlu' || username === 'hotpotlu@gmail.com') && password === 'qQ!0963067171') {
         loginSuccess = true;
       }
 
