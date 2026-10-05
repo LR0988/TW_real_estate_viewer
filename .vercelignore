@@ -1,0 +1,16 @@
+# Ignore database and large binary files
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python virtual environment & cache
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Git & OS
+.git/
+.DS_Store
