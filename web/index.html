@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>台灣房地產實價登錄觀測站 | 量價分析、路段建案與市場熱度可視化</title>
+
+  <!-- TailwindCSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eff6ff',
+              500: '#3b82f6',
+              600: '#2563eb',
+              900: '#1e3a8a',
+            },
+            heat: {
+              hot: '#ef4444',
+              warm: '#f97316',
+              neutral: '#06b6d4',
+              cool: '#64748b'
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Leaflet CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="/static/style.css?v=2.5">
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans antialiased h-screen flex flex-col overflow-hidden">
+
+  <!-- Header -->
+  <header class="bg-slate-900 border-b border-slate-800 px-6 py-3 flex items-center justify-between z-20 shrink-0">
+    <div class="flex items-center space-x-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
+        <i data-lucide="building-2" class="w-6 h-6 text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold tracking-tight flex items-center gap-2">
+          台灣房地產實價登錄觀測站
+          <span class="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">MOI OpenData</span>
+        </h1>
+        <p class="text-xs text-slate-400">成交量與變化率 • 交易單價與漲跌幅 • 路段建案深度透視 • 房市熱度評估</p>
+      </div>
+    </div>
+
+    <!-- Global Address & Building Quick Search -->
+    <div class="flex-1 max-w-md mx-4 relative hidden lg:block">
+      <div class="relative flex items-center">
+        <input type="text" id="global-search-input" 
+          placeholder="🔍 搜尋地址/門牌/樓層 (如: 新竹市中山路46號14樓)..." 
+          class="w-full bg-slate-950/90 border border-slate-700/80 hover:border-blue-500/80 focus:border-blue-500 rounded-xl pl-9 pr-20 py-1.5 text-xs text-white placeholder-slate-500 outline-none transition shadow-inner">
+        <i data-lucide="map-pin" class="w-3.5 h-3.5 text-blue-400 absolute left-3 pointer-events-none"></i>
+        <button id="btn-global-search" class="absolute right-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-medium rounded-lg transition shadow-sm">
+          定位查找
+        </button>
+      </div>
+    </div>
+
+    <!-- Quick stats & crawler button -->
+    <div class="flex items-center space-x-4">
+      <div class="hidden md:flex items-center space-x-4 text-xs text-slate-400 bg-slate-800/60 px-3 py-1.5 rounded-lg border border-slate-700/60">
+        <div>總收錄筆數: <span id="stat-total-tx" class="font-semibold text-slate-200">--</span></div>
+        <div class="w-px h-3 bg-slate-700"></div>
+        <div>已收錄季度: <span id="stat-total-periods" class="font-semibold text-slate-200">--</span></div>
+        <div class="w-px h-3 bg-slate-700"></div>
+        <div>最新資料: <span id="stat-latest-date" class="font-semibold text-emerald-400">--</span></div>
+      </div>
+
+      <button id="btn-crawl-latest" class="flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition shadow-sm">
+        <i data-lucide="refresh-cw" class="w-3.5 h-3.5" id="crawl-spinner"></i>
+        <span>抓取最新發布</span>
+      </button>
+
+      <button id="btn-open-crawler-modal" class="flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">
+        <i data-lucide="database" class="w-3.5 h-3.5"></i>
+        <span>歷史補齊管理</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Controls & Metric Switcher Bar -->
+  <div class="bg-slate-900/90 border-b border-slate-800 px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 z-10 shrink-0">
+    <!-- 4 Core Analytical Modes -->
+    <div class="flex items-center space-x-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
+      <button class="metric-btn active flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition" data-metric="volume">
+        <i data-lucide="bar-chart-3" class="w-4 h-4"></i>
+        <span>成交量</span>
+      </button>
+      <button class="metric-btn flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition text-slate-400 hover:text-slate-200" data-metric="price">
+        <i data-lucide="circle-dollar-sign" class="w-4 h-4"></i>
+        <span>交易金額</span>
+      </button>
+      <button class="metric-btn flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition text-slate-400 hover:text-slate-200" data-metric="momentum">
+        <i data-lucide="activity" class="w-4 h-4 text-emerald-400"></i>
+        <span>動量趨勢 (微分)</span>
+      </button>
+      <button class="metric-btn flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition text-slate-400 hover:text-slate-200" data-metric="heat">
+        <i data-lucide="flame" class="w-4 h-4 text-orange-400"></i>
+        <span>市場熱度分析</span>
+      </button>
+    </div>
+
+    <!-- Momentum Sub-Controls: Type & Interval (Toggleable on demand) -->
+    <div id="momentum-sub-controls" class="hidden flex items-center space-x-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-emerald-500/40 text-xs shadow-lg shadow-emerald-500/5 transition-all">
+      <span class="text-emerald-400 font-semibold flex items-center gap-1.5">
+        <i data-lucide="gauge" class="w-3.5 h-3.5"></i>
+        <span>微分指標:</span>
+      </span>
+      <!-- Momentum Target Type: Volume vs Price -->
+      <div class="flex items-center space-x-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800">
+        <button id="btn-mom-type-tx" class="mom-type-btn active px-2.5 py-1 rounded-md font-medium text-xs transition" data-type="tx">
+          成交量增幅 (ΔV)
+        </button>
+        <button id="btn-mom-type-price" class="mom-type-btn px-2.5 py-1 rounded-md font-medium text-xs text-slate-400 hover:text-white transition" data-type="price">
+          價格增幅 (ΔP)
+        </button>
+      </div>
+
+      <div class="w-px h-3.5 bg-slate-800"></div>
+
+      <span class="text-slate-400 font-medium text-[11px]">週期:</span>
+      <!-- Momentum Interval: MoM vs QoQ vs YoY -->
+      <div class="flex items-center space-x-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800">
+        <button id="btn-mom-interval-mom" class="mom-interval-btn px-2.5 py-1 rounded-md font-medium text-xs text-slate-400 hover:text-white transition" data-interval="mom">
+          月增 (MoM)
+        </button>
+        <button id="btn-mom-interval-qoq" class="mom-interval-btn active px-2.5 py-1 rounded-md font-medium text-xs transition" data-interval="qoq">
+          季增 (QoQ)
+        </button>
+        <button id="btn-mom-interval-yoy" class="mom-interval-btn px-2.5 py-1 rounded-md font-medium text-xs text-slate-400 hover:text-white transition" data-interval="yoy">
+          年增 (YoY)
+        </button>
+      </div>
+    </div>
+
+    <!-- Administrative Division Level Toggle (County / Town / Road & Project) -->
+    <div class="flex items-center space-x-2">
+      <div class="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+        <button class="level-btn active px-3 py-1 rounded-lg font-medium transition" data-level="county">
+          全台縣市 (22)
+        </button>
+        <button class="level-btn px-3 py-1 rounded-lg font-medium transition text-slate-400 hover:text-slate-200" data-level="town">
+          鄉鎮市區 (382)
+        </button>
+        <button class="level-btn px-3 py-1 rounded-lg font-medium transition text-slate-400 hover:text-slate-200" data-level="road">
+          路段與建案 (細分)
+        </button>
+      </div>
+
+      <!-- Hotspot Category Sub-filter (Visible when Road & Project level is active) -->
+      <div id="hotspot-sub-controls" class="hidden flex items-center space-x-1.5 bg-slate-950 px-2.5 py-1 rounded-xl border border-sky-500/40 text-xs shadow-lg shadow-sky-500/5 transition-all">
+        <span class="text-sky-400 font-semibold flex items-center gap-1">
+          <i data-lucide="map-pin" class="w-3.5 h-3.5"></i>
+          <span>細分熱點:</span>
+        </span>
+        <div class="flex items-center space-x-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800">
+          <button id="btn-hotspot-all" class="hotspot-type-btn active px-2.5 py-0.5 rounded-md font-medium text-xs transition" data-type="all">
+            全部地點
+          </button>
+          <button id="btn-hotspot-road" class="hotspot-type-btn px-2.5 py-0.5 rounded-md font-medium text-xs text-slate-400 hover:text-white transition" data-type="road">
+            🛣️ 路段
+          </button>
+          <button id="btn-hotspot-project" class="hotspot-type-btn px-2.5 py-0.5 rounded-md font-medium text-xs text-slate-400 hover:text-white transition" data-type="project">
+            🏢 建案
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Direct Region Selector (縣市 / 鄉鎮市區 / 全省) -->
+    <div class="flex items-center space-x-1.5 bg-slate-950 px-2.5 py-1.5 rounded-xl border border-indigo-500/30 text-xs shadow-lg shadow-indigo-500/5">
+      <div class="flex items-center space-x-1 text-indigo-400">
+        <i data-lucide="map" class="w-3.5 h-3.5"></i>
+        <span class="text-slate-400 font-medium">地區:</span>
+      </div>
+      <select id="select-global-county" class="bg-slate-900 border border-slate-700 hover:border-slate-600 text-slate-200 text-xs rounded-lg px-2 py-1 outline-none focus:border-indigo-500 cursor-pointer font-medium max-w-[110px]">
+        <option value="">全省 (全國合計)</option>
+      </select>
+      <select id="select-global-town" class="bg-slate-900 border border-slate-700 hover:border-slate-600 text-slate-200 text-xs rounded-lg px-2 py-1 outline-none focus:border-indigo-500 cursor-pointer font-medium max-w-[120px] disabled:opacity-40" disabled>
+        <option value="">全部鄉鎮市區</option>
+      </select>
+      <button id="btn-reset-national" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-medium transition" title="重設回全省">
+        回全省
+      </button>
+    </div>
+
+    <!-- Global Building Age Filter -->
+    <div class="flex items-center space-x-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 text-xs">
+      <div class="flex items-center space-x-1.5 text-amber-400">
+        <i data-lucide="home" class="w-3.5 h-3.5"></i>
+        <span class="text-slate-400 font-medium">屋齡:</span>
+      </div>
+      <select id="select-global-age" class="bg-slate-900 border border-slate-700 hover:border-slate-600 text-slate-200 text-xs rounded-lg px-2.5 py-1 outline-none focus:border-amber-500 cursor-pointer font-medium">
+        <option value="all">不限屋齡 (全部)</option>
+        <option value="0-5">0~5年 (新成屋/預售)</option>
+        <option value="5-10">5~10年 (次新屋)</option>
+        <option value="10-20">10~20年 (中古屋)</option>
+        <option value="20-30">20~30年 (成屋)</option>
+        <option value="30-999">30年以上 (老屋)</option>
+      </select>
+    </div>
+
+    <!-- Time Mode Switcher & Timeline Controls -->
+    <div class="flex items-center space-x-2.5 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 flex-1 max-w-2xl text-xs">
+      <div class="flex items-center bg-slate-900 p-0.5 rounded-lg border border-slate-800 shrink-0">
+        <button id="btn-time-mode-single" class="time-mode-btn active px-2.5 py-1 rounded-md font-medium text-xs transition" data-mode="single">
+          單季
+        </button>
+        <button id="btn-time-mode-range" class="time-mode-btn px-2.5 py-1 rounded-md font-medium text-xs text-slate-400 hover:text-white transition" data-mode="range">
+          區間篩選 📅
+        </button>
+      </div>
+
+      <!-- Single Period Slider Controls -->
+      <div id="time-single-controls" class="flex items-center space-x-3 flex-1">
+        <button id="btn-play" class="w-7 h-7 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 flex items-center justify-center transition shrink-0">
+          <i data-lucide="play" class="w-3.5 h-3.5" id="play-icon"></i>
+        </button>
+
+        <div class="flex-1 flex flex-col justify-center">
+          <div class="flex justify-between items-center text-[11px] text-slate-400 mb-0.5">
+            <span id="label-start-period">--</span>
+            <span id="label-current-period" class="font-bold text-blue-400 text-xs tracking-wider">--</span>
+            <span id="label-end-period">--</span>
+          </div>
+          <input type="range" id="period-slider" min="0" max="0" value="0" class="w-full accent-blue-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg">
+        </div>
+
+        <button id="btn-step-prev" class="p-1 text-slate-400 hover:text-slate-200 shrink-0" title="上一季">
+          <i data-lucide="chevron-left" class="w-4 h-4"></i>
+        </button>
+        <button id="btn-step-next" class="p-1 text-slate-400 hover:text-slate-200 shrink-0" title="下一季">
+          <i data-lucide="chevron-right" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <!-- Range Interval Controls (Visible when in Range mode) -->
+      <div id="time-range-controls" class="hidden flex items-center space-x-2 flex-1">
+        <span class="text-slate-400 text-[11px] shrink-0">從</span>
+        <select id="select-range-start" class="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-1 outline-none focus:border-blue-500 cursor-pointer font-medium font-mono">
+        </select>
+        <span class="text-slate-400 text-[11px] shrink-0">至</span>
+        <select id="select-range-end" class="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-1 outline-none focus:border-blue-500 cursor-pointer font-medium font-mono">
+        </select>
+        <div class="flex items-center space-x-1 pl-1 shrink-0">
+          <button class="range-preset-btn px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-[11px] font-medium transition" data-preset="1y">
+            近1年
+          </button>
+          <button class="range-preset-btn px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-[11px] font-medium transition" data-preset="3y">
+            近3年
+          </button>
+          <button class="range-preset-btn px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-[11px] font-medium transition" data-preset="all">
+            全部歷史
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main View Grid -->
+  <main class="flex-1 flex overflow-hidden relative">
+    <!-- Map Container -->
+    <div class="flex-1 relative bg-slate-950">
+      <div id="map" class="w-full h-full"></div>
+
+      <!-- Basemap Style Switcher (Top Right on Map) -->
+      <div class="absolute top-4 right-4 z-[1000] flex bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-xl p-1 shadow-xl text-xs">
+        <button class="basemap-btn active px-2.5 py-1 rounded-lg text-slate-200 transition" data-basemap="dark">
+          暗黑極簡
+        </button>
+        <button class="basemap-btn px-2.5 py-1 rounded-lg text-slate-400 hover:text-white transition" data-basemap="streets">
+          細部街道圖
+        </button>
+        <button class="basemap-btn px-2.5 py-1 rounded-lg text-slate-400 hover:text-white transition flex items-center gap-1" data-basemap="taiwan_emap" title="內政部國土測繪中心 官方臺灣通用電子地圖">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+          台灣通用地圖
+        </button>
+        <button class="basemap-btn px-2.5 py-1 rounded-lg text-slate-400 hover:text-white transition" data-basemap="satellite">
+          衛星空照
+        </button>
+      </div>
+
+      <!-- Map Reset View Button -->
+      <button id="btn-reset-map" class="absolute top-4 left-14 z-[1000] bg-slate-900/90 hover:bg-slate-800 border border-slate-800 text-slate-300 px-3 py-1.5 rounded-lg text-xs shadow-lg transition flex items-center space-x-1" title="重置地圖視野">
+        <i data-lucide="compass" class="w-4 h-4"></i>
+        <span>全台灣視野</span>
+      </button>
+
+      <!-- Map Overlay Legend with Customizable Color Bar & Auto-Scale Checkbox -->
+      <div id="map-legend" class="absolute bottom-6 left-6 z-[1000] bg-slate-900/95 backdrop-blur-md border border-slate-800 p-3.5 rounded-xl shadow-2xl text-xs w-72 transition-all duration-200">
+        <!-- Header -->
+        <div class="font-semibold text-slate-200 mb-2 flex items-center justify-between" id="legend-title">
+          <span id="legend-title-text">指標色階說明</span>
+          <span class="text-[10px] text-slate-400 font-mono" id="legend-unit"></span>
+        </div>
+
+        <!-- Color Gradient Bar -->
+        <div id="legend-gradient" class="h-2.5 rounded-md mb-1.5 shadow-inner"></div>
+
+        <!-- Dynamic Min / Mid / Max Labels -->
+        <div class="flex justify-between text-[10px] text-slate-300 font-mono mb-2" id="legend-labels">
+          <span id="lbl-legend-min">低</span>
+          <span id="lbl-legend-mid">中</span>
+          <span id="lbl-legend-max">高</span>
+        </div>
+
+        <!-- Controls: Auto-scale Checkbox & Custom Settings Toggle -->
+        <div class="flex items-center justify-between pt-2 border-t border-slate-800/80">
+          <label class="flex items-center space-x-1.5 cursor-pointer text-[11px] text-slate-200 select-none hover:text-white" title="打勾時依當前週期數值自動動態調整色階範圍">
+            <input type="checkbox" id="chk-auto-color" checked class="rounded accent-blue-500 w-3.5 h-3.5 cursor-pointer">
+            <span class="font-medium text-amber-300 flex items-center gap-1">
+              <span>自動調整顏色</span>
+              <span class="text-[9px] bg-amber-500/20 text-amber-300 px-1 py-0.2 rounded border border-amber-500/30">Auto</span>
+            </span>
+          </label>
+          <button id="btn-toggle-legend-custom" class="text-slate-400 hover:text-white text-[11px] flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 transition" title="展開自訂顏色色階設定">
+            <span id="txt-legend-custom-btn">自訂</span>
+            <i data-lucide="sliders-horizontal" class="w-3 h-3"></i>
+          </button>
+        </div>
+
+        <!-- Collapsible Customization Drawer Panel -->
+        <div id="legend-custom-panel" class="hidden mt-2.5 pt-2.5 border-t border-slate-800/80 space-y-2.5 text-[11px]">
+          <!-- Palette Selector -->
+          <div class="space-y-1">
+            <select id="select-color-palette" class="w-full bg-slate-950 border border-slate-700 hover:border-slate-600 rounded-lg px-2 py-1 text-slate-200 outline-none text-xs cursor-pointer">
+              <option value="momentum_tw">台股動量 (綠跌-灰平-紅漲)</option>
+              <option value="momentum_blue_red">金融動量 (深藍跌-灰平-焰紅漲)</option>
+              <option value="emerald_rose">翠綠至烈紅 (標準推薦)</option>
+              <option value="blue_red">深藍至暖紅 (經典對比)</option>
+              <option value="magma">烈火金黃 (高對比熱力)</option>
+              <option value="plasma">幻彩紫金 (Plasma)</option>
+              <option value="cool_blues">純藍漸變 (量能專用)</option>
+            </select>
+          </div>
+
+          <!-- Range Inputs (Min & Max) -->
+          <div class="space-y-1">
+            <div class="flex justify-between items-center text-slate-400 font-medium">
+              <span>數值區間範圍:</span>
+              <span id="custom-range-hint" class="text-[10px] text-emerald-400">(自動自適應中)</span>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <span class="text-[10px] text-slate-500">最小值 (Min)</span>
+                <input type="number" id="input-color-min" step="any" class="w-full bg-slate-950 border border-slate-700 rounded-md px-2 py-1 text-slate-200 outline-none focus:border-blue-500 font-mono text-xs">
+              </div>
+              <div>
+                <span class="text-[10px] text-slate-500">最大值 (Max)</span>
+                <input type="number" id="input-color-max" step="any" class="w-full bg-slate-950 border border-slate-700 rounded-md px-2 py-1 text-slate-200 outline-none focus:border-blue-500 font-mono text-xs">
+              </div>
+            </div>
+          </div>
+
+          <!-- Quick Action Buttons -->
+          <div class="flex items-center space-x-2 pt-1">
+            <button id="btn-apply-custom-color" class="flex-1 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-xs font-medium transition text-center">
+              套用自訂區間
+            </button>
+            <button id="btn-reset-custom-color" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-md text-xs transition">
+              重設
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Analytics & Details Right Sidebar -->
+    <aside class="w-96 lg:w-[440px] bg-slate-900 border-l border-slate-800 flex flex-col overflow-y-auto shrink-0 z-10">
+      <!-- Selected Region Header -->
+      <div class="p-4 border-b border-slate-800 bg-slate-900/50">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs uppercase tracking-wider text-slate-400" id="aside-level-badge">全國總覽</span>
+          <span class="text-xs font-semibold px-2 py-0.5 rounded-full" id="aside-heat-badge">--</span>
+        </div>
+        <div class="flex items-center justify-between">
+          <h2 class="text-xl font-bold text-white tracking-tight" id="aside-region-name">全台灣 (全國)</h2>
+          <button id="btn-open-tx-drawer" class="text-xs px-2.5 py-1 bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 border border-blue-500/30 rounded-lg flex items-center gap-1 transition">
+            <i data-lucide="list-ordered" class="w-3.5 h-3.5"></i>
+            <span>查看成交明細</span>
+          </button>
+        </div>
+        <p class="text-xs text-slate-400 mt-0.5" id="aside-period-desc">觀測週期: --</p>
+      </div>
+
+      <!-- 4 Quick KPI Cards -->
+      <div class="grid grid-cols-2 gap-2.5 p-4 border-b border-slate-800">
+        <!-- KPI 1: Volume -->
+        <div class="bg-slate-950 p-3 rounded-xl border border-slate-800/80">
+          <div class="text-[11px] text-slate-400 flex items-center justify-between">
+            <span>成交量 (筆)</span>
+            <i data-lucide="home" class="w-3.5 h-3.5 text-blue-400"></i>
+          </div>
+          <div class="text-lg font-bold text-slate-100 mt-1" id="kpi-volume">--</div>
+          <div class="text-[11px] flex items-center gap-1 mt-0.5" id="kpi-vol-growth">
+            <span>年增率: --</span>
+          </div>
+        </div>
+
+        <!-- KPI 2: Unit Price -->
+        <div class="bg-slate-950 p-3 rounded-xl border border-slate-800/80">
+          <div class="text-[11px] text-slate-400 flex items-center justify-between">
+            <span>平均每坪單價</span>
+            <i data-lucide="coins" class="w-3.5 h-3.5 text-emerald-400"></i>
+          </div>
+          <div class="text-lg font-bold text-slate-100 mt-1" id="kpi-price">--</div>
+          <div class="text-[11px] flex items-center gap-1 mt-0.5" id="kpi-price-growth">
+            <span>年漲幅: --</span>
+          </div>
+        </div>
+
+        <!-- KPI 3: Total Amount -->
+        <div class="bg-slate-950 p-3 rounded-xl border border-slate-800/80">
+          <div class="text-[11px] text-slate-400 flex items-center justify-between">
+            <span>交易總額 (億元)</span>
+            <i data-lucide="landmark" class="w-3.5 h-3.5 text-indigo-400"></i>
+          </div>
+          <div class="text-lg font-bold text-slate-100 mt-1" id="kpi-total-amount">--</div>
+          <div class="text-[10px] text-slate-500 mt-0.5" id="kpi-median-price">中位數: -- 萬/坪</div>
+        </div>
+
+        <!-- KPI 4: Heat Index -->
+        <div class="bg-slate-950 p-3 rounded-xl border border-slate-800/80">
+          <div class="text-[11px] text-slate-400 flex items-center justify-between">
+            <span>市場熱度指數</span>
+            <i data-lucide="flame" class="w-3.5 h-3.5 text-orange-400"></i>
+          </div>
+          <div class="text-lg font-bold text-slate-100 mt-1" id="kpi-heat">--</div>
+          <div class="text-[10px] text-slate-400 mt-0.5" id="kpi-heat-desc">評估等級: --</div>
+        </div>
+      </div>
+
+      <!-- Trend Chart Section (Clickable!) -->
+      <div class="p-4 border-b border-slate-800">
+        <div class="flex items-center justify-between mb-1">
+          <h3 class="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+            <i data-lucide="trending-up" class="w-4 h-4 text-blue-400"></i>
+            <span>歷年量價走勢趨勢圖</span>
+          </h3>
+          <button id="btn-chart-view-current" class="text-[11px] font-medium text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 px-2.5 py-0.5 rounded-lg transition flex items-center gap-1 shadow-sm" title="點擊直接查看當前所選季度的成交明細">
+            <i data-lucide="external-link" class="w-3 h-3"></i>
+            <span>查看【<span id="chart-btn-period-label">--</span>】明細</span>
+          </button>
+        </div>
+        <div class="text-[10px] text-slate-500 mb-2" id="chart-sub-label">所有季度走勢</div>
+        <div class="h-56 relative cursor-pointer">
+          <canvas id="trendChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Deep Dive Tabs: Top Districts / Top Roads / Top Projects -->
+      <div class="p-4 flex-1 flex flex-col">
+        <div class="flex items-center space-x-1 border-b border-slate-800 pb-2 mb-3 text-xs">
+          <button class="side-tab-btn active font-medium px-2.5 py-1 rounded-lg text-blue-400 bg-slate-800" data-tab="ranking">
+            🏆 行政區排行
+          </button>
+          <button class="side-tab-btn font-medium px-2.5 py-1 rounded-lg text-slate-400 hover:text-slate-200" data-tab="roads">
+            🛣️ 熱門路段
+          </button>
+          <button class="side-tab-btn font-medium px-2.5 py-1 rounded-lg text-slate-400 hover:text-slate-200" data-tab="projects">
+            🏢 指標建案/社區
+          </button>
+        </div>
+
+        <!-- Tab 1: Ranking Content -->
+        <div id="tab-content-ranking" class="space-y-1.5 text-xs flex-1">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-[11px] text-slate-400">依選擇指標排序</span>
+            <select id="select-ranking-metric" class="bg-slate-950 border border-slate-800 text-[11px] rounded-lg px-2 py-1 text-slate-300">
+              <option value="heat">依市場熱度</option>
+              <option value="volume">依成交量</option>
+              <option value="price">依每坪單價</option>
+              <option value="vol_growth">依成交量年增率</option>
+              <option value="price_growth">依房價年漲幅</option>
+            </select>
+          </div>
+          <div id="ranking-list" class="space-y-1.5">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+
+        <!-- Tab 2: Roads Content -->
+        <div id="tab-content-roads" class="space-y-1.5 text-xs hidden flex-1">
+          <div class="text-[11px] text-slate-400 mb-2">當期交易最熱絡之路段與街巷 (點擊可過濾)：</div>
+          <div id="roads-list" class="space-y-1.5">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+
+        <!-- Tab 3: Projects Content -->
+        <div id="tab-content-projects" class="space-y-1.5 text-xs hidden flex-1">
+          <div class="text-[11px] text-slate-400 mb-2">最新揭露預售建案與知名社區 (點擊可看戶別)：</div>
+          <div id="projects-list" class="space-y-1.5">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Detailed Transactions Modal / Drawer (Triggered by Trend Chart click or Detail button) -->
+  <div id="tx-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[99999] hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-5xl w-full h-[85vh] flex flex-col shadow-2xl overflow-hidden relative">
+      <!-- Modal Header -->
+      <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/90 shrink-0">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <span id="tx-modal-title">實價登錄成交明細透視</span>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" id="tx-modal-count">-- 筆</span>
+          </h3>
+          <p class="text-xs text-slate-400" id="tx-modal-sub">篩選區域與時間: --</p>
+        </div>
+
+        <button id="btn-close-tx-modal" class="text-slate-400 hover:text-white p-1 rounded-lg">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <!-- Filter Controls Bar in Modal -->
+      <div class="px-6 py-3 bg-slate-950 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0">
+        <div class="flex items-center space-x-2 flex-1 max-w-md">
+          <div class="relative w-full">
+            <input type="text" id="tx-search-keyword" placeholder="搜尋精準門牌/樓層 (如: 新竹市中山路46號14樓)..." class="w-full bg-slate-900 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5"></i>
+          </div>
+          <button id="btn-tx-search-trigger" class="px-2.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-medium transition shrink-0">
+            搜尋
+          </button>
+          <label class="flex items-center space-x-1 text-slate-300 text-[11px] whitespace-nowrap cursor-pointer ml-1" title="勾選後自動搜尋全歷史年份，不受當前季度限制">
+            <input type="checkbox" id="chk-tx-all-time" checked class="rounded accent-blue-500">
+            <span>全歷史</span>
+          </label>
+        </div>
+
+        <div class="flex items-center space-x-3 flex-wrap">
+          <!-- Building Age / Year Filter -->
+          <div class="flex items-center space-x-1.5 text-slate-300">
+            <span class="text-slate-400">屋齡/年份:</span>
+            <select id="tx-filter-age" class="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-slate-300 focus:outline-none focus:border-blue-500">
+              <option value="all">不限屋齡</option>
+              <option value="0-5">新成屋/預售 (0~5年)</option>
+              <option value="5-10">次新屋 (5~10年)</option>
+              <option value="10-20">中古屋 (10~20年)</option>
+              <option value="20-30">成屋 (20~30年)</option>
+              <option value="30-999">老屋 (30年以上)</option>
+            </select>
+          </div>
+
+          <label class="flex items-center space-x-1.5 text-slate-400 cursor-pointer">
+            <input type="checkbox" id="tx-filter-special" checked class="rounded accent-blue-500">
+            <span>排除特殊交易</span>
+          </label>
+
+          <select id="tx-sort-select" class="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-slate-300">
+            <option value="date_desc">依日期 (新到舊)</option>
+            <option value="age_asc">依屋齡 (最新屋優先)</option>
+            <option value="age_desc">依屋齡 (最老屋優先)</option>
+            <option value="build_year_desc">依完工年份 (最新優先)</option>
+            <option value="unit_price_desc">依單價 (高到低)</option>
+            <option value="unit_price_asc">依單價 (低到高)</option>
+            <option value="price_desc">依總價 (高到低)</option>
+            <option value="area_desc">依坪數 (大到小)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Table Body Container -->
+      <div class="flex-1 overflow-y-auto p-6" id="tx-table-container">
+        <table class="w-full text-left text-xs border-collapse">
+          <thead>
+            <tr class="border-b border-slate-800 text-slate-400 uppercase tracking-wider text-[11px] pb-2">
+              <th class="py-2.5 font-medium">交易日期</th>
+              <th class="py-2.5 font-medium">路段 / 門牌 / 建案</th>
+              <th class="py-2.5 font-medium">建物型態 / 樓層 / 屋齡</th>
+              <th class="py-2.5 font-medium">移轉建坪</th>
+              <th class="py-2.5 font-medium">格局</th>
+              <th class="py-2.5 font-medium text-right">每坪單價</th>
+              <th class="py-2.5 font-medium text-right">成交總價</th>
+            </tr>
+          </thead>
+          <tbody id="tx-table-body" class="divide-y divide-slate-800/60">
+            <!-- Dynamically populated -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Crawler & Backfill Management Modal -->
+  <div id="crawler-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[99999] hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative">
+      <button id="btn-close-crawler-modal" class="absolute top-4 right-4 text-slate-400 hover:text-white">
+        <i data-lucide="x" class="w-5 h-5"></i>
+      </button>
+
+      <div class="flex items-center space-x-3 mb-4">
+        <div class="w-10 h-10 rounded-xl bg-blue-600/20 text-blue-400 flex items-center justify-center">
+          <i data-lucide="server" class="w-6 h-6"></i>
+        </div>
+        <div>
+          <h3 class="text-base font-bold text-white">實價登錄資料爬蟲與回溯補齊</h3>
+          <p class="text-xs text-slate-400">內政部不動產實價登錄 (plvr.land.moi.gov.tw)</p>
+        </div>
+      </div>
+
+      <div class="space-y-4 text-xs">
+        <div class="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-2">
+          <div class="flex justify-between text-slate-400">
+            <span>資料庫路徑:</span>
+            <span class="font-mono text-slate-300">data/real_estate.db</span>
+          </div>
+          <div class="flex justify-between text-slate-400">
+            <span>已入庫總筆數:</span>
+            <span class="font-semibold text-emerald-400" id="modal-stat-records">--</span>
+          </div>
+          <div class="flex justify-between text-slate-400">
+            <span>已收錄季度數:</span>
+            <span class="text-slate-200" id="modal-stat-seasons">--</span>
+          </div>
+          <div class="flex justify-between text-slate-400">
+            <span>爬蟲目前狀態:</span>
+            <span class="text-blue-400 font-medium" id="modal-crawler-status">閒置中</span>
+          </div>
+        </div>
+
+        <div class="border-t border-slate-800 pt-3">
+          <h4 class="font-semibold text-slate-200 mb-2">歷史季度回溯補齊 (Backfill)</h4>
+          <p class="text-slate-400 text-[11px] mb-3">
+            實價登錄自民國 101 年第 3 季 (101S3，2012年8月) 正式實施，可自動分批回溯補齊至今。
+          </p>
+          <div class="flex gap-2">
+            <input type="text" id="backfill-start-season" value="101S3" placeholder="起始季度 (如 101S3)" class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white flex-1">
+            <input type="text" id="backfill-end-season" value="" placeholder="結束季度 (留空表示至最新)" class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white flex-1">
+          </div>
+          <button id="btn-trigger-backfill" class="w-full mt-3 py-2 bg-indigo-600 hover:bg-indigo-500 font-medium text-white rounded-lg transition">
+            開始回溯下載歷史資料
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notification Toast -->
+  <div id="toast" class="fixed bottom-6 right-6 bg-slate-900 border border-slate-800 text-white px-4 py-2.5 rounded-xl shadow-2xl text-xs z-[100000] hidden flex items-center space-x-2">
+    <i data-lucide="info" class="w-4 h-4 text-blue-400"></i>
+    <span id="toast-msg">通知訊息</span>
+  </div>
+
+  <!-- App JavaScript -->
+  <script src="/static/app.js?v=3.5"></script>
+</body>
+</html>

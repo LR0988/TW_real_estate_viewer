@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Large database files & raw data
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/raw/
+data/cache/
+data/geo/*.mbtiles
+data/geo/*.shp
+
+# OS files
+.DS_Store
+Thumbs.db
