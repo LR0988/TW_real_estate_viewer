@@ -372,6 +372,30 @@ def refresh_aggregations(db_path: Path = DB_PATH, exclude_special: bool = True):
     cur.execute("DELETE FROM agg_age_town_quarter")
     t_age_final.to_sql("agg_age_town_quarter", conn, if_exists="append", index=False)
 
+    # 4. Refresh road-quarter aggregations
+    cur.execute("""
+        INSERT OR REPLACE INTO agg_road_quarter
+        SELECT full_district,
+               MAX(county_name),
+               MAX(district),
+               road,
+               trade_quarter as period,
+               COUNT(*) as tx_count,
+               ROUND(AVG(unit_price_wan_ping), 2) as avg_unit_price,
+               ROUND(AVG(total_price_wan), 1) as avg_total_price,
+               ROUND(MIN(unit_price_wan_ping), 2) as min_unit_price,
+               ROUND(MAX(unit_price_wan_ping), 2) as max_unit_price,
+               GROUP_CONCAT(DISTINCT CASE WHEN project_name != '' AND project_name NOT LIKE '%--%' THEN project_name ELSE NULL END) as projects
+        FROM transactions
+        WHERE trade_year >= 2012
+          AND is_special_trade = 0
+          AND unit_price_wan_ping > 0
+          AND target_type != '土地'
+          AND road != '' AND road IS NOT NULL
+          AND road NOT LIKE '%--%' AND road NOT LIKE '%?%'
+        GROUP BY full_district, road, trade_quarter
+    """)
+
     conn.commit()
     conn.close()
 

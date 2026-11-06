@@ -179,6 +179,44 @@ def init_db(db_path: Path = DB_PATH):
     );
     CREATE INDEX IF NOT EXISTS idx_age_town_pq ON agg_age_town_quarter(period, age_bracket);
     CREATE INDEX IF NOT EXISTS idx_age_town_fq ON agg_age_town_quarter(full_district, age_bracket);
+
+    CREATE TABLE IF NOT EXISTS agg_road_quarter (
+        full_district TEXT,
+        county_name TEXT,
+        district TEXT,
+        road TEXT,
+        period TEXT,
+        tx_count INTEGER,
+        avg_unit_price REAL,
+        avg_total_price REAL,
+        min_unit_price REAL,
+        max_unit_price REAL,
+        projects TEXT,
+        PRIMARY KEY (full_district, road, period)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agg_road_p_dist ON agg_road_quarter(period, full_district);
+    CREATE INDEX IF NOT EXISTS idx_agg_road_p_county ON agg_road_quarter(period, county_name);
+
+    CREATE TABLE IF NOT EXISTS agg_spot_quarter (
+        full_district TEXT,
+        county_name TEXT,
+        district TEXT,
+        spot_name TEXT,
+        spot_type TEXT,
+        road TEXT,
+        project_name TEXT,
+        door_addr TEXT,
+        building_type TEXT,
+        period TEXT,
+        tx_count INTEGER,
+        avg_unit_price REAL,
+        avg_total_price REAL,
+        min_unit_price REAL,
+        max_unit_price REAL,
+        PRIMARY KEY (full_district, spot_name, period)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agg_spot_p_dist ON agg_spot_quarter(period, full_district, tx_count DESC);
+    CREATE INDEX IF NOT EXISTS idx_agg_spot_p_county ON agg_spot_quarter(period, county_name, tx_count DESC);
     """)
 
     conn.commit()

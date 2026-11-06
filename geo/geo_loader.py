@@ -207,16 +207,46 @@ def ensure_geojson_assets():
     return True
 
 
+_COUNTY_GEOJSON_CACHE = None
+_TOWN_GEOJSON_CACHE = None
+
+
 def load_county_geojson():
-    ensure_geojson_assets()
-    with open(COUNTY_GEOJSON_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    global _COUNTY_GEOJSON_CACHE
+    if _COUNTY_GEOJSON_CACHE is None:
+        ensure_geojson_assets()
+        with open(COUNTY_GEOJSON_PATH, "r", encoding="utf-8") as f:
+            _COUNTY_GEOJSON_CACHE = json.load(f)
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": dict(feat["properties"]),
+                "geometry": feat["geometry"]
+            }
+            for feat in _COUNTY_GEOJSON_CACHE["features"]
+        ]
+    }
 
 
 def load_town_geojson():
-    ensure_geojson_assets()
-    with open(TOWN_GEOJSON_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    global _TOWN_GEOJSON_CACHE
+    if _TOWN_GEOJSON_CACHE is None:
+        ensure_geojson_assets()
+        with open(TOWN_GEOJSON_PATH, "r", encoding="utf-8") as f:
+            _TOWN_GEOJSON_CACHE = json.load(f)
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": dict(feat["properties"]),
+                "geometry": feat["geometry"]
+            }
+            for feat in _TOWN_GEOJSON_CACHE["features"]
+        ]
+    }
 
 
 if __name__ == "__main__":

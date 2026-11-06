@@ -1,75 +1,21 @@
 """
-Fast Parallel Geocoding Seeder for all Taiwan towns' top roads and projects.
-Populates location_coordinates table so map queries have 100% cached coordinates.
+Fast Parallel Geocoding Seeder for all Taiwan districts' top spots, doors, projects, and roads.
+Uses 4 persistent HTTP Keep-Alive workers against ArcGIS to populate location_coordinates.
 """
 import concurrent.futures
-import json
 import logging
 import sqlite3
 import sys
 import time
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
-# Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import DB_PATH
-from geo.geocoder import init_geocoder_db, clean_term, normalize_tw_terms
+from geo.geocoder import init_geocoder_db, clean_term, extract_clean_door, geocode_arcgis
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def geocode_one(full_district: str, road: str):
-    clean_dist = clean_term(full_district)
-    clean_rd = clean_term(road)
-    q_norm = normalize_tw_terms(f"{clean_dist}{clean_rd}")
-    q_orig = f"{clean_dist}{clean_rd}"
-
-    queries = [q_norm]
-    if q_orig != q_norm:
-        queries.append(q_orig)
-
-    for q in queries:
-        url = (
-            f"https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
-            f"?SingleLine={urllib.parse.quote(q)}&countryCode=TWN&outFields=*&f=json&maxLocations=1"
-        )
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                "Accept": "application/json"
-            }
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                candidates = data.get("candidates", [])
-                if candidates:
-                    top = candidates[0]
-                    score = float(top.get("score", 0))
-                    attr = top.get("attributes", {})
-                    addr_type = attr.get("Addr_type", "")
-                    match_addr = top.get("address", "") or attr.get("Match_addr", "")
-
-                    if addr_type in ("Locality", "Admin", "Subregion", "District", "City", "Postal"):
-                        target_check = clean_rd
-                        target_check_alt = normalize_tw_terms(target_check)
-                        if target_check and target_check not in match_addr and target_check_alt not in match_addr:
-                            continue
-
-                    if score >= 75.0:
-                        loc = top["location"]
-                        lat = round(float(loc["y"]), 6)
-                        lng = round(float(loc["x"]), 6)
-                        if 21.8 <= lat <= 26.5 and 119.3 <= lng <= 122.6:
-                            return lat, lng, score
-        except Exception:
-            continue
-    return None
 
 
 def run_seed():
@@ -77,84 +23,88 @@ def run_seed():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    # 1. Fetch existing cached keys
     cur.execute("SELECT query_key FROM location_coordinates")
-    existing_keys = set(row[0] for row in cur.fetchall())
+    existing_keys = {row[0] for row in cur.fetchall()}
     logger.info(f"Existing cached locations: {len(existing_keys)}")
 
-    # 2. Get top 6 roads for EVERY town in Taiwan from recent transactions (>= 2022)
     cur.execute("""
-        WITH RankedRoads AS (
-            SELECT full_district, road, COUNT(*) as cnt,
-                   ROW_NUMBER() OVER(PARTITION BY full_district ORDER BY COUNT(*) DESC) as rn
-            FROM transactions
-            WHERE trade_year >= 2022 AND road != '' AND road IS NOT NULL
-              AND (road LIKE '%路%' OR road LIKE '%街%' OR road LIKE '%大道%' OR road LIKE '%巷%')
-              AND target_type != '土地' AND is_special_trade = 0 AND unit_price_wan_ping > 0
-            GROUP BY full_district, road
+        WITH Ranked AS (
+            SELECT full_district, spot_name, road, MAX(door_addr) as door_addr, SUM(tx_count) as total_tx,
+                   ROW_NUMBER() OVER(PARTITION BY full_district ORDER BY SUM(tx_count) DESC) as rn
+            FROM agg_spot_quarter
+            WHERE period >= '2023Q1'
+            GROUP BY full_district, spot_name
         )
-        SELECT full_district, road, cnt
-        FROM RankedRoads
-        WHERE rn <= 6
-        ORDER BY cnt DESC
+        SELECT full_district, spot_name, road, door_addr
+        FROM Ranked
+        WHERE rn <= 15
+        ORDER BY total_tx DESC
     """)
     candidates = cur.fetchall()
     conn.close()
 
-    to_fetch = []
-    for dist, rd, cnt in candidates:
-        c_dist = clean_term(dist)
-        c_rd = clean_term(rd)
-        key = f"{c_dist}_{c_rd}_{c_rd}"
-        key_norm = f"{normalize_tw_terms(c_dist)}_{normalize_tw_terms(c_rd)}_{normalize_tw_terms(c_rd)}"
-        if key not in existing_keys and key_norm not in existing_keys:
-            to_fetch.append((c_dist, c_rd, key))
+    road_tasks = []
+    spot_tasks = []
+    for f_dist, s_name, rd, d_addr in candidates:
+        dist = clean_term(f_dist, keep_door_parens=False)
+        nm = clean_term(s_name, keep_door_parens=True)
+        clean_rd = clean_term(rd or "", keep_door_parens=False)
+        door = d_addr or extract_clean_door(nm) or ""
+        if clean_rd:
+            rk = f"{dist}_{clean_rd}_{clean_rd}"
+            if rk not in existing_keys:
+                existing_keys.add(rk)
+                road_tasks.append((rk, dist, clean_rd, clean_rd, ""))
+        k = f"{dist}_{nm}_{clean_rd}"
+        if k not in existing_keys:
+            existing_keys.add(k)
+            spot_tasks.append((k, dist, nm, clean_rd, door))
 
-    logger.info(f"Total candidates: {len(candidates)}, Need geocoding: {len(to_fetch)}")
+    all_tasks = road_tasks + spot_tasks
+    logger.info(f"Seeding {len(road_tasks)} roads and {len(spot_tasks)} specific spots/doors...")
 
-    success_items = []
-    batch_size = 50
-
-    def worker(item):
-        d, r, k = item
-        res = geocode_one(d, r)
+    def _worker(item):
+        k, dist, nm, rd, door = item
+        res = geocode_arcgis(dist, nm, rd, door)
         if res:
-            lat, lng, score = res
-            return (k, d, r, r, lat, lng, "arcgis", score)
+            lat, lng, score, src = res
+            return (k, dist, nm, rd, lat, lng, src, score)
         return None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(worker, item): item for item in to_fetch}
-        done_cnt = 0
-        for fut in concurrent.futures.as_completed(futures):
-            done_cnt += 1
-            res = fut.result()
-            if res:
-                success_items.append(res)
-
-            if len(success_items) >= batch_size:
-                c2 = sqlite3.connect(DB_PATH)
-                c2.executemany("""
+    t0 = time.time()
+    saved = 0
+    batch = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        for idx, out in enumerate(pool.map(_worker, all_tasks), 1):
+            if out:
+                batch.append(out)
+                saved += 1
+            if len(batch) >= 25:
+                c = sqlite3.connect(DB_PATH, timeout=15)
+                c.execute("PRAGMA journal_mode = WAL;")
+                c.executemany("""
                     INSERT OR REPLACE INTO location_coordinates
                     (query_key, full_district, name, road, lat, lng, source, match_score)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, success_items)
-                c2.commit()
-                c2.close()
-                logger.info(f"Progress: {done_cnt}/{len(to_fetch)} processed, saved {len(success_items)} items...")
-                success_items = []
+                """, batch)
+                c.commit()
+                c.close()
+                batch.clear()
+            if idx % 100 == 0:
+                logger.info(f"Progress: {idx}/{len(all_tasks)} processed, {saved} geocoded ({round(time.time() - t0, 1)}s)")
 
-    if success_items:
-        c2 = sqlite3.connect(DB_PATH)
-        c2.executemany("""
+    if batch:
+        c = sqlite3.connect(DB_PATH, timeout=15)
+        c.execute("PRAGMA journal_mode = WAL;")
+        c.executemany("""
             INSERT OR REPLACE INTO location_coordinates
             (query_key, full_district, name, road, lat, lng, source, match_score)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, success_items)
-        c2.commit()
-        c2.close()
+        """, batch)
+        c.commit()
+        c.close()
 
-    logger.info(f"Seeding completed! Processed {len(to_fetch)} items.")
+    logger.info(f"Completed! Geocoded {saved}/{len(all_tasks)} locations in {round(time.time() - t0, 1)}s.")
 
 
 if __name__ == "__main__":

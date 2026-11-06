@@ -81,27 +81,67 @@ def clean_number(val, default=0.0) -> float:
         return default
 
 
-def extract_road(addr: str) -> str:
+_FULLWIDTH_NUM_MAP = str.maketrans(
+    "０１２３４５６７８９巿",
+    "0123456789市"
+)
+_ARABIC_SECTION_MAP = {
+    "1段": "一段", "2段": "二段", "3段": "三段", "4段": "四段", "5段": "五段",
+    "6段": "六段", "7段": "七段", "8段": "八段", "9段": "九段", "10段": "十段"
+}
+
+
+def extract_road(addr: str, county_name: str = "", district: str = "") -> str:
     """
-    Extracts road / street name from Taiwan address.
-    e.g. '臺北市大安區忠孝東路四段211~240號' -> '忠孝東路四段'
-    e.g. '新北市板橋區文化路二段182巷5號' -> '文化路二段'
-    e.g. '高雄市前金區市中一路234巷16號' -> '市中一路'
+    Extracts road / street name from Taiwan address without truncating road names
+    that contain 市/縣/區/鄉/鎮 (e.g. 新市三路二段, 縣政二路南段, 市政北七路, 市民大道四段, 鎮興路, 工業區一路).
     """
     if not addr:
         return ""
-    # Strip administrative prefixes (e.g. 臺北市大安區, 高雄市前金區, 新竹縣竹東鎮)
-    clean = re.sub(r'^(?:臺灣省|福建省)?(?:[^市縣]+?[市縣])?(?:[^區鄉鎮市]+?[區鄉鎮市])?', '', addr)
-    m = re.search(r'([^\d段巷弄號里鄰]+?(?:路|街|大道)(?:[一二三四五六七八九十]+段)?)', clean)
+    clean = str(addr).strip().translate(_FULLWIDTH_NUM_MAP)
+    # Strip leading postal code if any
+    clean = re.sub(r'^\d{3,6}\s*', '', clean)
+    # Strip leading province
+    clean = re.sub(r'^(?:[臺台]灣省|福建省)+', '', clean)
+
+    # If county_name / district are known, strip them first (including 臺/台 variants and repetitions)
+    if county_name:
+        c_alt = county_name.replace("臺", "台")
+        c_std = county_name.replace("台", "臺")
+        for c in (c_std, c_alt):
+            while clean.startswith(c):
+                clean = clean[len(c):].lstrip()
+    if district:
+        d_alt = district.replace("臺", "台")
+        d_std = district.replace("台", "臺")
+        for d in (d_std, d_alt):
+            while clean.startswith(d):
+                clean = clean[len(d):].lstrip()
+
+    # Fallback strip if county/district were not passed or differed (e.g. old 桃園縣中壢市)
+    clean = re.sub(r'^(?:[臺台]北市|新北市|桃園[市縣]|[臺台]中[市縣]|[臺台]南[市縣]|高雄[市縣]|基隆市|新竹[市縣]|嘉義[市縣]|苗栗縣|彰化縣|南投縣|雲林縣|屏東縣|宜蘭縣|花蓮縣|[臺台]東縣|澎湖縣|金門縣|連江縣)+', '', clean)
+    clean = re.sub(
+        r'^(?:[^區鄉鎮市路街]{1,2}(?:鎮區|市區|鄉區|[區鄉鎮]|市(?![民政場中一路二三四五六七八九十東西南北街大道])))+',
+        '',
+        clean
+    )
+    # Strip optional village (里/村) and neighborhood (鄰)
+    clean = re.sub(r'^(?:[^\d巷弄號路街]{1,4}[里村])?(?:\d+鄰)?', '', clean)
+
+    m = re.search(
+        r'([^\d段巷弄號里鄰\(\)（）\s,，]+?(?:路|街|大道)(?:[一二三四五六七八九十0-9東西南北中]+段)?)',
+        clean
+    )
     if m:
-        return m.group(1).strip()
-    m2 = re.search(r'([^\d段巷弄號里區鄰市縣鄉鎮]+?(?:路|街|大道)(?:[一二三四五六七八九十]+段)?)', addr)
-    if m2:
-        return m2.group(1).strip()
-    m_sect = re.search(r'([^號地]+?段)', addr)
+        rd = m.group(1).strip()
+        for k, v in _ARABIC_SECTION_MAP.items():
+            if k in rd:
+                rd = rd.replace(k, v)
+        return rd
+
+    m_sect = re.search(r'([^號地\(\)（）\s,，]+?段)', clean)
     if m_sect:
-        c_sect = re.sub(r'^.*?(?:市|縣|區|鄉|鎮)', '', m_sect.group(1)).strip()
-        return c_sect if c_sect else m_sect.group(1).strip()
+        return m_sect.group(1).strip()
     return ""
 
 

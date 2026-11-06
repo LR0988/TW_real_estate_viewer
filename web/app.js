@@ -450,6 +450,7 @@ function initMap() {
   // Dedicated pane for Road and Project Hotspot markers (above labels, above GeoJSON polygons)
   STATE.map.createPane('hotspotPane');
   STATE.map.getPane('hotspotPane').style.zIndex = 650;
+  STATE.hotspotRenderer = L.canvas({ pane: 'hotspotPane', padding: 0.5 });
 
   // Set default Esri Dark Gray Base + Road Labels
   setBasemap('dark');
@@ -989,23 +990,22 @@ async function updateView() {
       }
     }).addTo(STATE.map);
 
-    // If in "Road & Project" mode, render road/project hotspot pins!
+    // Execute Hotspot rendering, KPI overview, and Sidebar tabs concurrently!
+    const tasks = [
+      loadRanking(),
+      loadTopRoads(STATE.selectedRegion),
+      loadTopProjects(STATE.selectedRegion),
+    ];
     if (STATE.activeLevel === 'road') {
-      await renderLocationHotspots(geojsonData);
+      tasks.push(renderLocationHotspots(geojsonData));
     }
-
-    // Load Overview / Region Detail
     if (!STATE.selectedRegion) {
-      await loadNationalSummary();
-      await loadHistoricalTrend('national', '全國合計');
+      tasks.push(loadNationalSummary());
+      tasks.push(loadHistoricalTrend('national', '全國合計'));
     } else {
-      await loadRegionDetail(fetchLevel, STATE.selectedRegion);
+      tasks.push(loadRegionDetail(fetchLevel, STATE.selectedRegion));
     }
-
-    // Load Sidebar Tabs (Rankings, Roads, Projects)
-    await loadRanking();
-    await loadTopRoads(STATE.selectedRegion);
-    await loadTopProjects(STATE.selectedRegion);
+    await Promise.all(tasks);
 
   } catch (err) {
     console.error('Failed to update view:', err);
@@ -1041,8 +1041,8 @@ async function renderLocationHotspots(geojsonData, period) {
       const isProject = item.type === 'project';
       const isDoor = item.type === 'door';
       const txCount = item.tx_count || 0;
-      // Proportional marker sizing: min 7.5px, max 24px
-      const radius = Math.min(24, Math.max(7.5, Math.round(Math.sqrt(txCount) * 2.8)));
+      // Proportional marker sizing: min 6.5px, max 22px
+      const radius = Math.min(22, Math.max(6.5, Math.round(Math.sqrt(txCount) * 2.6)));
 
       // Dynamic color matching current active analytical metric & palette
       const fillColor = getColorForMetric(item, STATE.activeMetric);
@@ -1054,10 +1054,11 @@ async function renderLocationHotspots(geojsonData, period) {
 
       const marker = L.circleMarker([lat, lng], {
         pane: 'hotspotPane',
+        renderer: STATE.hotspotRenderer,
         radius: radius,
         fillColor: fillColor,
         color: strokeColor,
-        weight: isProject ? 2.5 : 2.0,
+        weight: isProject ? 2.2 : 1.8,
         opacity: 0.95,
         fillOpacity: 0.88,
       });
@@ -1081,13 +1082,17 @@ async function renderLocationHotspots(geojsonData, period) {
         metricValueHtml = `<span class="${clr} font-bold">${sign}${num.toFixed(1)}% (${metricName})</span>`;
       }
 
+      const addrSub = item.door_addr && !item.name.includes(item.door_addr)
+        ? `${item.full_district}${item.road || ''}${item.door_addr}`
+        : `${item.full_district}${item.road && !item.name.includes(item.road) ? item.road : ''}`;
+
       const hoverTip = `
         <div class="custom-tooltip-box py-1 px-2">
           <div class="flex items-center gap-1.5 text-xs font-bold text-white">
             <span class="${isProject ? 'text-amber-400' : (isDoor ? 'text-emerald-400' : 'text-sky-400')}">${typeBadgeText}</span>
             <span>${item.name}</span>
           </div>
-          <div class="text-[11px] text-slate-300 mt-0.5">${item.full_district}</div>
+          <div class="text-[11px] text-slate-300 mt-0.5">${addrSub}</div>
           <div class="text-[11px] text-slate-200 mt-1 flex items-center justify-between gap-2 border-t border-slate-700/60 pt-1">
             <span class="text-slate-400">${getMetricDisplayName(STATE.activeMetric)}:</span>
             ${metricValueHtml}
@@ -1123,7 +1128,7 @@ async function renderLocationHotspots(geojsonData, period) {
             <div>
               <span class="inline-block px-1.5 py-0.5 text-[10px] rounded font-semibold ${badgeCls} mb-1">${typeBadgeText}</span>
               <div class="font-bold text-sm text-white">${item.name}</div>
-              <div class="text-[11px] text-slate-400">${item.full_district} ${item.road && item.name !== item.road ? `(${item.road})` : ''}</div>
+              <div class="text-[11px] text-slate-400">${addrSub}</div>
               ${buildingTypeTag}
             </div>
             <span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 font-mono self-start">${timeLabel}</span>
@@ -1266,14 +1271,12 @@ async function selectRegion(regionName, layer = null) {
   // Determine whether regionName is a county or a town
   const isCounty = STATE.regionTree && STATE.regionTree[regionName] !== undefined;
   const queryLevel = isCounty ? 'county' : (STATE.activeLevel === 'county' ? 'county' : 'town');
-  await loadRegionDetail(queryLevel, regionName);
-  await loadTopRoads(regionName);
-  await loadTopProjects(regionName);
-
-  // If in granular Road & Project mode, load hotspot pins for this region!
-  if (STATE.activeLevel === 'road') {
-    await renderLocationHotspots(null);
-  }
+  await Promise.all([
+    loadRegionDetail(queryLevel, regionName),
+    loadTopRoads(regionName),
+    loadTopProjects(regionName),
+    STATE.activeLevel === 'road' ? renderLocationHotspots(null) : Promise.resolve()
+  ]);
 }
 
 // 7. Load Region Details

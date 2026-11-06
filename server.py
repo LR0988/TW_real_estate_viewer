@@ -1236,22 +1236,20 @@ def search_and_locate(q: str = Query(..., min_length=1)):
             lat, lng, match_score, coord_source = c_row[0], c_row[1], c_row[2], c_row[3]
 
     if (lat is None or lng is None) and target_district:
-        res = geocode_arcgis(target_district, target_name or q, target_road)
+        res = geocode_arcgis(target_district, target_name or q, target_road, target_addr)
         if res:
-            lat, lng, match_score = res
-            coord_source = "arcgis"
+            lat, lng, match_score, coord_source = res
             cur.execute("""
                 INSERT OR REPLACE INTO location_coordinates
                 (query_key, full_district, name, road, lat, lng, source, match_score)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (f"{target_district}_{target_name}_{target_road}", target_district, target_name, target_road, lat, lng, "arcgis", match_score))
+            """, (f"{target_district}_{target_name}_{target_road}", target_district, target_name, target_road, lat, lng, coord_source, match_score))
             conn.commit()
 
     if lat is None or lng is None:
-        res = geocode_arcgis("", q, target_road)
+        res = geocode_arcgis("", q, target_road, target_addr)
         if res:
-            lat, lng, match_score = res
-            coord_source = "arcgis"
+            lat, lng, match_score, coord_source = res
 
     conn.close()
 
@@ -1293,7 +1291,7 @@ def get_town_centroids() -> Dict[str, List[float]]:
     return _TOWN_CENTROIDS_CACHE
 
 
-_NUM_MAP = str.maketrans('０１２３４５６７８９', '0123456789')
+_NUM_MAP = str.maketrans('０１２３４５６７８９巿', '0123456789市')
 _DOOR_REGEX = re.compile(r'((?:(?:\d+)巷)?(?:(?:\d+)弄)?(?:\d+(?:[~～\-]\d+)?號))')
 
 
@@ -1336,121 +1334,158 @@ def get_location_hotspots(
     """
     Returns unmerged, granular location-level hotspots (individual door numbers,
     lanes, and building projects) with transaction metrics, market heat score,
-    and real GPS coordinates.
+    and real GPS coordinates in sub-50ms using pre-aggregated tables.
     """
     conn = get_connection()
-    conn.create_function("get_spot_name", 3, extract_spot_name)
-    conn.create_function("get_spot_type", 3, extract_spot_type)
     cur = conn.cursor()
 
-    where_base = [
-        "trade_year >= 2012",
-        "is_special_trade = 0",
-        "unit_price_wan_ping > 0",
-        "target_type != '土地'",
-        "road NOT LIKE '%--%'",
-        "road NOT LIKE '%?%'"
-    ]
-    params_base = []
-
-    if start_period and end_period:
-        where_base.append("trade_quarter >= ? AND trade_quarter <= ?")
-        params_base.extend([start_period, end_period])
-    elif period:
-        where_base.append("trade_quarter = ?")
-        params_base.append(period)
-
-    if region:
-        where_base.append("(county_name = ? OR full_district = ?)")
-        params_base.extend([region, region])
-
-    if min_age is not None:
-        where_base.append("building_age >= ?")
-        params_base.append(min_age)
-
-    if max_age is not None:
-        where_base.append("building_age <= ?")
-        params_base.append(max_age)
-
-    if type == "road":
-        where_base.append("get_spot_type(address, road, project_name) != 'project'")
-    elif type == "project":
-        where_base.append("get_spot_type(address, road, project_name) = 'project'")
-
-    # Check whether region is a county (contains 市/縣 but not 區/鄉/鎮)
     is_county = False
     if region:
         clean_reg = region.replace("臺", "台")
         is_county = any(clean_reg.endswith(x) for x in ["市", "縣"]) and not any(x in clean_reg for x in ["區", "鄉", "鎮", "市區"])
 
-    if not region:
-        # Nationwide view: Select top 8 unmerged spots per district across all towns
-        fetch_limit = limit if limit is not None else 1500
-        query = f"""
-            WITH AggSpots AS (
-                SELECT get_spot_name(address, road, project_name) as spot,
-                       get_spot_type(address, road, project_name) as spot_type,
-                       road, full_district, county_name, district,
-                       COUNT(*) as tx_count,
-                       ROUND(AVG(unit_price_wan_ping), 2) as avg_unit_price,
-                       ROUND(AVG(total_price_wan), 1) as avg_total_price,
-                       ROUND(MIN(unit_price_wan_ping), 2) as min_unit_price,
-                       ROUND(MAX(unit_price_wan_ping), 2) as max_unit_price,
-                       building_type
-                FROM transactions
-                WHERE {" AND ".join(where_base)}
-                GROUP BY full_district, spot
-            ),
-            RankedSpots AS (
-                SELECT *, ROW_NUMBER() OVER(PARTITION BY full_district ORDER BY tx_count DESC) as rn
+    use_preagg = (min_age is None and max_age is None)
+
+    if use_preagg:
+        where_agg = ["1=1"]
+        params_agg = []
+        is_range = bool(start_period and end_period and start_period != end_period)
+
+        if is_range:
+            where_agg.append("period >= ? AND period <= ?")
+            params_agg.extend([start_period, end_period])
+        elif period or start_period:
+            where_agg.append("period = ?")
+            params_agg.append(period or start_period)
+
+        if region:
+            if is_county:
+                where_agg.append("county_name = ?")
+                params_agg.append(region)
+            else:
+                where_agg.append("full_district = ?")
+                params_agg.append(region)
+
+        if type == "road":
+            where_agg.append("spot_type != 'project'")
+        elif type == "project":
+            where_agg.append("spot_type = 'project'")
+
+        if not is_range:
+            base_cte = f"""
+                SELECT spot_name as spot, spot_type, road, door_addr, project_name,
+                       full_district, county_name, district,
+                       tx_count, avg_unit_price, avg_total_price,
+                       min_unit_price, max_unit_price, building_type
+                FROM agg_spot_quarter
+                WHERE {" AND ".join(where_agg)}
+            """
+        else:
+            base_cte = f"""
+                SELECT spot_name as spot,
+                       MAX(spot_type) as spot_type,
+                       MAX(road) as road,
+                       MAX(door_addr) as door_addr,
+                       MAX(project_name) as project_name,
+                       full_district,
+                       MAX(county_name) as county_name,
+                       MAX(district) as district,
+                       SUM(tx_count) as tx_count,
+                       ROUND(SUM(avg_unit_price * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_unit_price,
+                       ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_total_price,
+                       ROUND(MIN(min_unit_price), 2) as min_unit_price,
+                       ROUND(MAX(max_unit_price), 2) as max_unit_price,
+                       MAX(building_type) as building_type
+                FROM agg_spot_quarter
+                WHERE {" AND ".join(where_agg)}
+                GROUP BY full_district, spot_name
+            """
+
+        if not region:
+            fetch_limit = limit if limit is not None else 1500
+            query = f"""
+                WITH AggSpots AS ({base_cte}),
+                RankedSpots AS (
+                    SELECT *, ROW_NUMBER() OVER(PARTITION BY full_district ORDER BY tx_count DESC) as rn
+                    FROM AggSpots
+                )
+                SELECT spot as name, spot_type as type, road, door_addr, project_name,
+                       full_district, county_name, district,
+                       tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
+                FROM RankedSpots
+                WHERE rn <= 8
+                ORDER BY tx_count DESC
+                LIMIT ?
+            """
+            params = params_agg + [fetch_limit]
+        elif is_county:
+            fetch_limit = limit if limit is not None else 2000
+            query = f"""
+                WITH AggSpots AS ({base_cte}),
+                RankedSpots AS (
+                    SELECT *, ROW_NUMBER() OVER(PARTITION BY full_district ORDER BY tx_count DESC) as rn
+                    FROM AggSpots
+                )
+                SELECT spot as name, spot_type as type, road, door_addr, project_name,
+                       full_district, county_name, district,
+                       tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
+                FROM RankedSpots
+                WHERE rn <= 30
+                ORDER BY tx_count DESC
+                LIMIT ?
+            """
+            params = params_agg + [fetch_limit]
+        else:
+            fetch_limit = limit if limit is not None else 4000
+            query = f"""
+                WITH AggSpots AS ({base_cte})
+                SELECT spot as name, spot_type as type, road, door_addr, project_name,
+                       full_district, county_name, district,
+                       tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
                 FROM AggSpots
-            )
-            SELECT spot as name, spot_type as type, road, full_district, county_name, district,
-                   tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
-            FROM RankedSpots
-            WHERE rn <= 8
-            ORDER BY tx_count DESC
-            LIMIT ?
-        """
-        params = list(params_base) + [fetch_limit]
-    elif is_county:
-        # County view: Select top 30 unmerged spots per district in this county
-        fetch_limit = limit if limit is not None else 2000
-        query = f"""
-            WITH AggSpots AS (
-                SELECT get_spot_name(address, road, project_name) as spot,
-                       get_spot_type(address, road, project_name) as spot_type,
-                       road, full_district, county_name, district,
-                       COUNT(*) as tx_count,
-                       ROUND(AVG(unit_price_wan_ping), 2) as avg_unit_price,
-                       ROUND(AVG(total_price_wan), 1) as avg_total_price,
-                       ROUND(MIN(unit_price_wan_ping), 2) as min_unit_price,
-                       ROUND(MAX(unit_price_wan_ping), 2) as max_unit_price,
-                       building_type
-                FROM transactions
-                WHERE {" AND ".join(where_base)}
-                GROUP BY full_district, spot
-            ),
-            RankedSpots AS (
-                SELECT *, ROW_NUMBER() OVER(PARTITION BY full_district ORDER BY tx_count DESC) as rn
-                FROM AggSpots
-            )
-            SELECT spot as name, spot_type as type, road, full_district, county_name, district,
-                   tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
-            FROM RankedSpots
-            WHERE rn <= 30
-            ORDER BY tx_count DESC
-            LIMIT ?
-        """
-        params = list(params_base) + [fetch_limit]
+                ORDER BY tx_count DESC
+                LIMIT ?
+            """
+            params = params_agg + [fetch_limit]
     else:
-        # District view: All unmerged spots in this specific district!
-        fetch_limit = limit if limit is not None else 4000
+        conn.create_function("get_spot_name", 3, extract_spot_name)
+        conn.create_function("get_spot_type", 3, extract_spot_type)
+        where_base = [
+            "trade_year >= 2012",
+            "is_special_trade = 0",
+            "unit_price_wan_ping > 0",
+            "target_type != '土地'",
+            "road NOT LIKE '%--%'",
+            "road NOT LIKE '%?%'"
+        ]
+        params_base = []
+        if start_period and end_period:
+            where_base.append("trade_quarter >= ? AND trade_quarter <= ?")
+            params_base.extend([start_period, end_period])
+        elif period:
+            where_base.append("trade_quarter = ?")
+            params_base.append(period)
+        if region:
+            where_base.append("(county_name = ? OR full_district = ?)")
+            params_base.extend([region, region])
+        if min_age is not None:
+            where_base.append("building_age >= ?")
+            params_base.append(min_age)
+        if max_age is not None:
+            where_base.append("building_age <= ?")
+            params_base.append(max_age)
+        if type == "road":
+            where_base.append("get_spot_type(address, road, project_name) != 'project'")
+        elif type == "project":
+            where_base.append("get_spot_type(address, road, project_name) = 'project'")
+
+        fetch_limit = limit if limit is not None else (4000 if (region and not is_county) else (2000 if is_county else 1500))
+        rn_limit = 8 if not region else (30 if is_county else 99999)
         query = f"""
             WITH AggSpots AS (
                 SELECT get_spot_name(address, road, project_name) as spot,
                        get_spot_type(address, road, project_name) as spot_type,
-                       road, full_district, county_name, district,
+                       road, '' as door_addr, project_name, full_district, county_name, district,
                        COUNT(*) as tx_count,
                        ROUND(AVG(unit_price_wan_ping), 2) as avg_unit_price,
                        ROUND(AVG(total_price_wan), 1) as avg_total_price,
@@ -1460,10 +1495,16 @@ def get_location_hotspots(
                 FROM transactions
                 WHERE {" AND ".join(where_base)}
                 GROUP BY full_district, spot
+            ),
+            RankedSpots AS (
+                SELECT *, ROW_NUMBER() OVER(PARTITION BY full_district ORDER BY tx_count DESC) as rn
+                FROM AggSpots
             )
-            SELECT spot as name, spot_type as type, road, full_district, county_name, district,
+            SELECT spot as name, spot_type as type, road, door_addr, project_name,
+                   full_district, county_name, district,
                    tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
-            FROM AggSpots
+            FROM RankedSpots
+            WHERE rn <= {rn_limit}
             ORDER BY tx_count DESC
             LIMIT ?
         """
@@ -1485,49 +1526,39 @@ def get_location_hotspots(
         h["yoy_price_change"] = 0.0
         h["mom_price_change"] = 0.0
 
-    # Calculate Momentum (QoQ / YoY / MoM) if single period is present or end_period
+    # Fast sub-10ms Momentum (QoQ / YoY / MoM) lookup using pre-aggregated tables!
     calc_period = period if period else end_period
-    if calc_period and len(calc_period) == 6 and calc_period[4] == 'Q':
+    if calc_period and len(calc_period) == 6 and calc_period[4] == 'Q' and hotspots:
         y, q = int(calc_period[:4]), int(calc_period[5])
         prev_q = f"{y if q > 1 else y - 1}Q{q - 1 if q > 1 else 4}"
         prev_y = f"{y - 1}Q{q}"
 
-        # 1. Road baseline map (shared across door numbers on the same road)
-        road_items = [h for h in hotspots if h.get("road")]
-        unique_roads = list({(h["full_district"], h["road"]) for h in road_items if h.get("road")})
-        road_prev_map = {}
-        for idx in range(0, len(unique_roads), 80):
-            chunk = unique_roads[idx:idx + 80]
-            road_conds = " OR ".join(["(full_district = ? AND road = ?)" for _ in chunk])
-            q_params = [prev_q, prev_y]
-            for dist, rd in chunk:
-                q_params.extend([dist, rd])
-            cur.execute(f"""
-                SELECT full_district, road, trade_quarter, COUNT(*) as tx_count, AVG(unit_price_wan_ping) as avg_price
-                FROM transactions
-                WHERE trade_quarter IN (?, ?) AND ({road_conds}) AND is_special_trade = 0
-                GROUP BY full_district, road, trade_quarter
-            """, q_params)
-            for row in cur.fetchall():
-                road_prev_map[(row[0], row[1], row[2])] = {"tx_count": row[3], "avg_price": row[4]}
+        reg_cond = ""
+        reg_params = [prev_q, prev_y]
+        if region:
+            if is_county:
+                reg_cond = " AND county_name = ?"
+            else:
+                reg_cond = " AND full_district = ?"
+            reg_params.append(region)
 
-        # 2. Projects baseline map
-        proj_items = [h for h in hotspots if h["type"] == "project"]
+        road_prev_map = {}
+        cur.execute(f"""
+            SELECT full_district, road, period, tx_count, avg_unit_price
+            FROM agg_road_quarter
+            WHERE period IN (?, ?){reg_cond}
+        """, reg_params)
+        for row in cur.fetchall():
+            road_prev_map[(row[0], row[1], row[2])] = {"tx_count": row[3], "avg_price": row[4]}
+
         proj_prev_map = {}
-        for idx in range(0, len(proj_items), 80):
-            chunk = proj_items[idx:idx + 80]
-            proj_conds = " OR ".join(["(full_district = ? AND project_name = ?)" for _ in chunk])
-            p_params = [prev_q, prev_y]
-            for h in chunk:
-                p_params.extend([h["full_district"], h["name"]])
-            cur.execute(f"""
-                SELECT full_district, project_name, trade_quarter, COUNT(*) as tx_count, AVG(unit_price_wan_ping) as avg_price
-                FROM transactions
-                WHERE trade_quarter IN (?, ?) AND ({proj_conds}) AND is_special_trade = 0
-                GROUP BY full_district, project_name, trade_quarter
-            """, p_params)
-            for row in cur.fetchall():
-                proj_prev_map[(row[0], row[1], row[2])] = {"tx_count": row[3], "avg_price": row[4]}
+        cur.execute(f"""
+            SELECT full_district, spot_name, period, tx_count, avg_unit_price
+            FROM agg_spot_quarter
+            WHERE period IN (?, ?){reg_cond} AND spot_type = 'project'
+        """, reg_params)
+        for row in cur.fetchall():
+            proj_prev_map[(row[0], row[1], row[2])] = {"tx_count": row[3], "avg_price": row[4]}
 
         for h in hotspots:
             if h["type"] == "project":
@@ -1537,11 +1568,11 @@ def get_location_hotspots(
                 pq_data = road_prev_map.get((h["full_district"], h.get("road"), prev_q))
                 py_data = road_prev_map.get((h["full_district"], h.get("road"), prev_y))
 
-            if pq_data and pq_data["tx_count"] > 0:
+            if pq_data and pq_data["tx_count"] > 0 and pq_data["avg_price"] > 0:
                 h["qoq_tx_change"] = round((h["tx_count"] - pq_data["tx_count"]) / pq_data["tx_count"] * 100, 2)
                 h["qoq_price_change"] = round((h["avg_unit_price"] - pq_data["avg_price"]) / pq_data["avg_price"] * 100, 2)
 
-            if py_data and py_data["tx_count"] > 0:
+            if py_data and py_data["tx_count"] > 0 and py_data["avg_price"] > 0:
                 h["yoy_tx_change"] = round((h["tx_count"] - py_data["tx_count"]) / py_data["tx_count"] * 100, 2)
                 h["yoy_price_change"] = round((h["avg_unit_price"] - py_data["avg_price"]) / py_data["avg_price"] * 100, 2)
 
@@ -1585,51 +1616,90 @@ def get_top_roads(
     conn = get_connection()
     cur = conn.cursor()
 
-    where_clauses = [
-        "road != '' AND road IS NOT NULL AND trade_year >= 2012",
-        "(road LIKE '%路%' OR road LIKE '%街%' OR road LIKE '%大道%' OR road LIKE '%巷%')",
-        "road NOT LIKE '%--%'",
-        "road NOT LIKE '%?%'",
-        "target_type != '土地'"
-    ]
-    params = []
+    if min_age is None and max_age is None:
+        where_agg = ["(road LIKE '%路%' OR road LIKE '%街%' OR road LIKE '%大道%' OR road LIKE '%巷%')"]
+        params = []
+        is_range = bool(start_period and end_period and start_period != end_period)
+        if is_range:
+            where_agg.append("period >= ? AND period <= ?")
+            params.extend([start_period, end_period])
+        elif period or start_period:
+            where_agg.append("period = ?")
+            params.append(period or start_period)
 
-    if start_period and end_period:
-        where_clauses.append("trade_quarter >= ? AND trade_quarter <= ?")
-        params.extend([start_period, end_period])
-    elif period:
-        where_clauses.append("trade_quarter = ?")
-        params.append(period)
+        if region:
+            where_agg.append("(county_name = ? OR full_district = ?)")
+            params.extend([region, region])
 
-    if region:
-        where_clauses.append("(county_name = ? OR full_district = ?)")
-        params.extend([region, region])
+        if not is_range:
+            query = f"""
+                SELECT road, full_district, county_name, district,
+                       tx_count, avg_unit_price, avg_total_price,
+                       min_unit_price, max_unit_price, projects
+                FROM agg_road_quarter
+                WHERE {" AND ".join(where_agg)}
+                ORDER BY tx_count DESC
+                LIMIT ?
+            """
+        else:
+            query = f"""
+                SELECT road, full_district, MAX(county_name) as county_name, MAX(district) as district,
+                       SUM(tx_count) as tx_count,
+                       ROUND(SUM(avg_unit_price * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_unit_price,
+                       ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_total_price,
+                       ROUND(MIN(min_unit_price), 2) as min_unit_price,
+                       ROUND(MAX(max_unit_price), 2) as max_unit_price,
+                       GROUP_CONCAT(DISTINCT projects) as projects
+                FROM agg_road_quarter
+                WHERE {" AND ".join(where_agg)}
+                GROUP BY full_district, road
+                ORDER BY tx_count DESC
+                LIMIT ?
+            """
+        params.append(limit)
+        rows = cur.execute(query, params).fetchall()
+    else:
+        where_clauses = [
+            "road != '' AND road IS NOT NULL AND trade_year >= 2012",
+            "(road LIKE '%路%' OR road LIKE '%街%' OR road LIKE '%大道%' OR road LIKE '%巷%')",
+            "road NOT LIKE '%--%'",
+            "road NOT LIKE '%?%'",
+            "target_type != '土地'"
+        ]
+        params = []
+        if start_period and end_period:
+            where_clauses.append("trade_quarter >= ? AND trade_quarter <= ?")
+            params.extend([start_period, end_period])
+        elif period:
+            where_clauses.append("trade_quarter = ?")
+            params.append(period)
+        if region:
+            where_clauses.append("(county_name = ? OR full_district = ?)")
+            params.extend([region, region])
+        if min_age is not None:
+            where_clauses.append("building_age >= ?")
+            params.append(min_age)
+        if max_age is not None:
+            where_clauses.append("building_age <= ?")
+            params.append(max_age)
+        where_str = " AND ".join(where_clauses)
+        query = f"""
+            SELECT road, full_district, county_name, district,
+                   COUNT(*) as tx_count,
+                   ROUND(AVG(unit_price_wan_ping), 2) as avg_unit_price,
+                   ROUND(AVG(total_price_wan), 1) as avg_total_price,
+                   ROUND(MIN(unit_price_wan_ping), 2) as min_unit_price,
+                   ROUND(MAX(unit_price_wan_ping), 2) as max_unit_price,
+                   GROUP_CONCAT(DISTINCT project_name) as projects
+            FROM transactions
+            WHERE {where_str}
+            GROUP BY full_district, road
+            ORDER BY tx_count DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        rows = cur.execute(query, params).fetchall()
 
-    if min_age is not None:
-        where_clauses.append("building_age >= ?")
-        params.append(min_age)
-
-    if max_age is not None:
-        where_clauses.append("building_age <= ?")
-        params.append(max_age)
-
-    where_str = " AND ".join(where_clauses)
-    query = f"""
-        SELECT road, full_district, county_name, district,
-               COUNT(*) as tx_count,
-               ROUND(AVG(unit_price_wan_ping), 2) as avg_unit_price,
-               ROUND(AVG(total_price_wan), 1) as avg_total_price,
-               ROUND(MIN(unit_price_wan_ping), 2) as min_unit_price,
-               ROUND(MAX(unit_price_wan_ping), 2) as max_unit_price,
-               GROUP_CONCAT(DISTINCT project_name) as projects
-        FROM transactions
-        WHERE {where_str}
-        GROUP BY full_district, road
-        ORDER BY tx_count DESC
-        LIMIT ?
-    """
-    params.append(limit)
-    rows = cur.execute(query, params).fetchall()
     conn.close()
 
     results = []
@@ -1637,7 +1707,7 @@ def get_top_roads(
     for r in rows:
         d = dict(r)
         proj_str = d.get("projects") or ""
-        proj_list = [p.strip() for p in proj_str.split(",") if p.strip() and p.strip() != "--請選擇--"]
+        proj_list = list(dict.fromkeys([p.strip() for p in proj_str.split(",") if p.strip() and p.strip() != "--請選擇--"]))
         d["projects_list"] = proj_list[:5]
         score, lvl = compute_market_heat_score(d["tx_count"], 0.0, 0.0, 0.0, 0.0, d["avg_unit_price"])
         d["heat_score"] = score
@@ -1664,50 +1734,88 @@ def get_top_projects(
     conn = get_connection()
     cur = conn.cursor()
 
-    where_clauses = [
-        "project_name != '' AND project_name IS NOT NULL AND trade_year >= 2012",
-        "project_name NOT LIKE '%--%'",
-        "project_name NOT LIKE '%?%'",
-        "target_type != '土地'"
-    ]
-    params = []
+    if min_age is None and max_age is None:
+        where_agg = [
+            "spot_type = 'project'",
+            "project_name != '' AND project_name IS NOT NULL",
+            "project_name NOT LIKE '%--%'",
+            "project_name NOT LIKE '%?%'"
+        ]
+        params = []
+        is_range = bool(start_period and end_period and start_period != end_period)
+        if is_range:
+            where_agg.append("period >= ? AND period <= ?")
+            params.extend([start_period, end_period])
+        elif period or start_period:
+            where_agg.append("period = ?")
+            params.append(period or start_period)
 
-    if start_period and end_period:
-        where_clauses.append("trade_quarter >= ? AND trade_quarter <= ?")
-        params.extend([start_period, end_period])
-    elif period:
-        where_clauses.append("trade_quarter = ?")
-        params.append(period)
+        if region:
+            where_agg.append("(county_name = ? OR full_district = ?)")
+            params.extend([region, region])
 
-    if region:
-        where_clauses.append("(county_name = ? OR full_district = ?)")
-        params.extend([region, region])
+        query = f"""
+            SELECT project_name, full_district,
+                   MAX(county_name) as county_name,
+                   MAX(district) as district,
+                   MAX(road) as road,
+                   MAX(door_addr) as door_addr,
+                   SUM(tx_count) as tx_count,
+                   ROUND(SUM(avg_unit_price * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_unit_price,
+                   ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_total_price,
+                   ROUND(MIN(min_unit_price), 2) as min_unit_price,
+                   ROUND(MAX(max_unit_price), 2) as max_unit_price,
+                   MAX(building_type) as building_type
+            FROM agg_spot_quarter
+            WHERE {" AND ".join(where_agg)}
+            GROUP BY project_name, full_district
+            ORDER BY tx_count DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        rows = cur.execute(query, params).fetchall()
+    else:
+        where_clauses = [
+            "project_name != '' AND project_name IS NOT NULL AND trade_year >= 2012",
+            "project_name NOT LIKE '%--%'",
+            "project_name NOT LIKE '%?%'",
+            "target_type != '土地'"
+        ]
+        params = []
+        if start_period and end_period:
+            where_clauses.append("trade_quarter >= ? AND trade_quarter <= ?")
+            params.extend([start_period, end_period])
+        elif period:
+            where_clauses.append("trade_quarter = ?")
+            params.append(period)
+        if region:
+            where_clauses.append("(county_name = ? OR full_district = ?)")
+            params.extend([region, region])
+        if min_age is not None:
+            where_clauses.append("building_age >= ?")
+            params.append(min_age)
+        if max_age is not None:
+            where_clauses.append("building_age <= ?")
+            params.append(max_age)
 
-    if min_age is not None:
-        where_clauses.append("building_age >= ?")
-        params.append(min_age)
+        where_str = " AND ".join(where_clauses)
+        query = f"""
+            SELECT project_name, full_district, county_name, district, road, '' as door_addr,
+                   COUNT(*) as tx_count,
+                   ROUND(AVG(unit_price_wan_ping), 2) as avg_unit_price,
+                   ROUND(AVG(total_price_wan), 1) as avg_total_price,
+                   ROUND(MIN(unit_price_wan_ping), 2) as min_unit_price,
+                   ROUND(MAX(unit_price_wan_ping), 2) as max_unit_price,
+                   building_type
+            FROM transactions
+            WHERE {where_str}
+            GROUP BY project_name, full_district
+            ORDER BY tx_count DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        rows = cur.execute(query, params).fetchall()
 
-    if max_age is not None:
-        where_clauses.append("building_age <= ?")
-        params.append(max_age)
-
-    where_str = " AND ".join(where_clauses)
-    query = f"""
-        SELECT project_name, full_district, county_name, district, road,
-               COUNT(*) as tx_count,
-               ROUND(AVG(unit_price_wan_ping), 2) as avg_unit_price,
-               ROUND(AVG(total_price_wan), 1) as avg_total_price,
-               ROUND(MIN(unit_price_wan_ping), 2) as min_unit_price,
-               ROUND(MAX(unit_price_wan_ping), 2) as max_unit_price,
-               building_type
-        FROM transactions
-        WHERE {where_str}
-        GROUP BY project_name, full_district
-        ORDER BY tx_count DESC
-        LIMIT ?
-    """
-    params.append(limit)
-    rows = cur.execute(query, params).fetchall()
     conn.close()
 
     results = []
