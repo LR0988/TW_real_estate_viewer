@@ -44,9 +44,9 @@ const SUPABASE_CONFIG = {
   anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3dmhtc3NseXp3bWN1ZXF3bGpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyMTE0OTMsImV4cCI6MjEwNjc4NzQ5M30.uk5Swq9XNwAzT-8ZWsEwerNkfyDQhOTRGxcfB4BgypE'
 };
 
-const DEFAULT_DESKTOP_TUNNEL = 'https://nonpersuadable-unequilaterally-ezra.ngrok-free.dev';
+const DEFAULT_DESKTOP_TUNNEL = 'https://stand-evaluating-reality-distinguished.trycloudflare.com';
 
-// API Fetch Helper targeting Desktop Backend with ngrok header bypass
+// API Fetch Helper targeting Desktop Backend with automatic tunnel fallback
 async function apiFetch(path, options = {}) {
   const base = (STATE.desktopBackendUrl || '').replace(/\/+$/, '');
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
@@ -56,7 +56,18 @@ async function apiFetch(path, options = {}) {
     'ngrok-skip-browser-warning': 'true',
     ...(opts.headers || {})
   };
-  return fetch(fullUrl, opts);
+  try {
+    const res = await fetch(fullUrl, opts);
+    if (!res.ok && base && (res.status === 403 || res.status === 502 || res.status === 530)) {
+      return fetch(cleanPath, opts);
+    }
+    return res;
+  } catch (err) {
+    if (base && !path.startsWith('http')) {
+      return fetch(cleanPath, opts);
+    }
+    throw err;
+  }
 }
 
 const COLOR_PALETTES = {
@@ -237,8 +248,14 @@ async function initAppData() {
 
 function initAuthAndDesktop() {
   // 1. Initialize Desktop Backend URL
-  const savedDesktopUrl = localStorage.getItem('tw_re_desktop_url');
+  let savedDesktopUrl = localStorage.getItem('tw_re_desktop_url');
   const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+  // Auto-upgrade stale ngrok or previous quick-tunnel URLs saved in browser localStorage
+  if (savedDesktopUrl && (savedDesktopUrl.includes('ngrok') || (savedDesktopUrl.includes('trycloudflare.com') && savedDesktopUrl !== DEFAULT_DESKTOP_TUNNEL))) {
+    savedDesktopUrl = isLocalHost ? '' : DEFAULT_DESKTOP_TUNNEL;
+    localStorage.setItem('tw_re_desktop_url', savedDesktopUrl);
+  }
   
   if (savedDesktopUrl !== null) {
     STATE.desktopBackendUrl = savedDesktopUrl;

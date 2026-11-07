@@ -6,6 +6,7 @@
   "installCommand": "",
   "cleanUrls": true,
   "rewrites": [
+    { "source": "/api/:path*", "destination": "https://stand-evaluating-reality-distinguished.trycloudflare.com/api/:path*" },
     { "source": "/static/:path*", "destination": "/:path*" }
   ],
   "headers": [
