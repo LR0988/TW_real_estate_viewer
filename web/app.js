@@ -1102,11 +1102,13 @@ async function renderLocationHotspots(geojsonData, period, options = {}) {
       // Proportional marker sizing: min 6.5px, max 22px
       const radius = Math.min(22, Math.max(6.5, Math.round(Math.sqrt(txCount) * 2.6)));
 
+      const commName = (item.project_name && item.project_name !== 'nan') ? item.project_name.trim() : (isProject ? item.name : '');
+      const hasComm = Boolean(commName);
       // Dynamic color matching current active analytical metric & palette
       const fillColor = getColorForMetric(item, STATE.activeMetric);
-      const strokeColor = isProject ? '#fbbf24' : (isDoor ? '#34d399' : '#38bdf8'); // Amber for Project, Emerald for Door, Sky Blue for Road
-      const typeBadgeText = isProject ? '🏢 指標建案' : (isDoor ? '📍 門牌地址' : '🛣️ 主要路段');
-      const badgeCls = isProject
+      const strokeColor = (isProject || hasComm) ? '#fbbf24' : (isDoor ? '#34d399' : '#38bdf8');
+      const typeBadgeText = isProject ? '🏢 指標建案' : (hasComm ? `🏢 ${commName}` : (isDoor ? '📍 門牌地址' : '🛣️ 主要路段'));
+      const badgeCls = (isProject || hasComm)
         ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
         : (isDoor ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-sky-500/20 text-sky-300 border border-sky-500/30');
 
@@ -1222,12 +1224,25 @@ async function renderLocationHotspots(geojsonData, period, options = {}) {
         ? `<div class="text-[11px] text-slate-400 mt-0.5">建築型態: <span class="text-slate-200">${item.building_type}</span></div>`
         : '';
 
+      const safeComm = commName.replace(/'/g, "\\'");
+      const safeName = (item.name || '').replace(/'/g, "\\'");
+      const safeRoad = (item.road || '').replace(/'/g, "\\'");
+      const safeDoor = (item.door_addr || '').replace(/'/g, "\\'");
+      const popupTitle = (hasComm && !isProject) ? `${commName} <span class="text-xs font-normal text-slate-300">(${item.name})</span>` : item.name;
+
       const popupHtml = `
-        <div class="p-1.5 min-w-[245px]">
+        <div class="p-1.5 min-w-[260px]">
           <div class="flex items-center justify-between pb-1.5 mb-2 border-b border-slate-700">
             <div>
-              <span class="inline-block px-1.5 py-0.5 text-[10px] rounded font-semibold ${badgeCls} mb-1">${typeBadgeText}</span>
-              <div class="font-bold text-sm text-white">${item.name}</div>
+              <div class="flex items-center gap-1 mb-1">
+                <span class="inline-block px-1.5 py-0.5 text-[10px] rounded font-semibold ${badgeCls}">${typeBadgeText}</span>
+                <button class="px-1.5 py-0.5 text-[10px] rounded bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 transition"
+                  onclick="promptTagCommunityName('${item.full_district}', '${safeName}', '${safeComm}', '${safeRoad}', '${safeDoor}')"
+                  title="標註或修改此門牌對應之建案名稱">
+                  🏷️ ${hasComm ? '改名' : '標註建案'}
+                </button>
+              </div>
+              <div class="font-bold text-sm text-white">${popupTitle}</div>
               <div class="text-[11px] text-slate-400">${addrSub}</div>
               ${buildingTypeTag}
             </div>
@@ -1298,15 +1313,21 @@ async function renderLocationHotspots(geojsonData, period, options = {}) {
 
           ${projExtra}
 
-          <div class="mt-2.5 pt-2 border-t border-slate-700/80 flex items-center gap-1.5">
-            <button class="flex-1 py-1 px-2 text-center bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px] font-medium transition"
-              onclick="openTransactionDrawer('${timeLabel}', '${item.full_district}', '${item.road || ''}', ${isProject ? `'${item.name}'` : 'null'}, ${isDoor ? `'${item.name}'` : 'null'})">
-              查看交易明細 &rarr;
+          <div class="mt-2.5 pt-2 border-t border-slate-700/80 flex flex-col gap-1.5">
+            <button class="w-full py-1.5 px-2 text-center bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded text-[11px] font-semibold transition shadow"
+              onclick="openCommunityTrendModal('${item.full_district}', '${safeComm}', '${safeName}', '${safeRoad}', '${safeDoor}')">
+              📈 查看建案歷年價格走勢與轉手獲利
             </button>
-            <button class="py-1 px-2 text-center bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[11px] font-medium transition"
-              onclick="flyToLocation(${lat}, ${lng}, 16, '${item.name}')" title="聚焦放大此地點">
-              🔍 放大
-            </button>
+            <div class="flex items-center gap-1.5">
+              <button class="flex-1 py-1 px-2 text-center bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px] font-medium transition"
+                onclick="openTransactionDrawer('${timeLabel}', '${item.full_district}', '${safeRoad}', ${isProject ? `'${safeName}'` : 'null'}, ${isDoor ? `'${safeName}'` : 'null'})">
+                查看交易明細 &rarr;
+              </button>
+              <button class="py-1 px-2 text-center bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[11px] font-medium transition"
+                onclick="flyToLocation(${lat}, ${lng}, 16, '${safeName}')" title="聚焦放大此地點">
+                🔍 放大
+              </button>
+            </div>
           </div>
         </div>
       `;
@@ -1799,18 +1820,24 @@ async function loadTopProjects(region) {
            </button>`
         : '';
 
+      const trendBtn = `<button class="trend-btn px-2 py-0.5 rounded bg-purple-600/30 hover:bg-purple-600/50 text-purple-200 border border-purple-500/40 text-[10px] font-medium transition"
+             title="查看此建案歷年價格走勢與同戶轉手獲利">
+             📈 走勢
+           </button>`;
+
       el.innerHTML = `
         <div class="flex items-center justify-between">
           <div class="font-bold text-amber-400 flex items-center gap-1.5 truncate">
             <span class="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"></span>
             <span class="truncate">${p.project_name}</span>
           </div>
-          <div class="flex items-center gap-1.5 shrink-0">
+          <div class="flex items-center gap-1 shrink-0">
             <span class="font-bold text-emerald-400 text-xs">${p.avg_unit_price} 萬/坪</span>
+            ${trendBtn}
             ${locateBtn}
           </div>
         </div>
-        <div class="text-[10px] text-slate-300 mt-0.5">${p.full_district} ${p.road || ''}</div>
+        <div class="text-[10px] text-slate-300 mt-0.5">${p.full_district} ${p.road || ''}${p.door_addr ? p.door_addr : ''}</div>
         <div class="flex items-center justify-between text-[10px] text-slate-400 mt-1">
           <span>揭露成交: ${p.tx_count} 筆 | 型態: ${p.building_type || '大樓'}</span>
           <span>均總價: ${p.avg_total_price} 萬</span>
@@ -1823,7 +1850,12 @@ async function loadTopProjects(region) {
           switchToRoadLevelAndFly(p.lat, p.lng, 16, `${p.project_name} (${p.full_district})`);
           return;
         }
-        openTransactionDrawer(timeLabel, p.full_district, null, p.project_name);
+        if (e.target.closest('.trend-btn')) {
+          e.stopPropagation();
+          openCommunityTrendModal(p.full_district, p.project_name, p.project_name, p.road || '', p.door_addr || '');
+          return;
+        }
+        openCommunityTrendModal(p.full_district, p.project_name, p.project_name, p.road || '', p.door_addr || '');
       });
 
       container.appendChild(el);
@@ -2649,7 +2681,229 @@ function showToast(msg) {
   }, 3500);
 }
 
+let communityTrendChartInstance = null;
+
+async function promptTagCommunityName(region, spotName, currentComm, road = '', doorAddr = '') {
+  const newName = window.prompt(
+    `請輸入「${region} ${spotName}」對應的建案/社區名稱：\n(設定後將自動歸戶並更新地圖標記)`,
+    currentComm || ''
+  );
+  if (!newName || !newName.trim()) return;
+  try {
+    const params = new URLSearchParams({
+      region: region || '',
+      spot_name: spotName || '',
+      community_name: newName.trim(),
+      road: road || '',
+      door_addr: doorAddr || ''
+    });
+    const res = await apiFetch(`/api/community/tag?${params.toString()}`, { method: 'POST' });
+    if (res.ok) {
+      showToast(`已將 ${spotName} 標註為建案「${newName.trim()}」！`);
+      clearLocationHotspots();
+      await renderLocationHotspots();
+    } else {
+      showToast('標註失敗，請稍後再試');
+    }
+  } catch (err) {
+    console.error('Tag community failed:', err);
+    showToast('標註失敗');
+  }
+}
+
+async function openCommunityTrendModal(region, projectName, spotName, road = '', doorAddr = '') {
+  if (STATE.map) {
+    STATE.map.closePopup();
+  }
+  const modal = document.getElementById('community-trend-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+
+  const closeBtn = document.getElementById('btn-close-ct-modal');
+  if (closeBtn) {
+    closeBtn.onclick = () => modal.classList.add('hidden');
+  }
+
+  document.getElementById('ct-title').innerText = projectName || spotName || '載入中...';
+  document.getElementById('ct-region-badge').innerText = region || '--';
+  document.getElementById('ct-spec-badge').innerText = '正在分析歷史價格走勢與同戶轉手紀錄...';
+  document.getElementById('ct-doors-list').innerText = '載入中...';
+  document.getElementById('ct-repeat-tbody').innerHTML = '<tr><td colspan="6" class="py-4 text-center text-slate-500">分析中...</td></tr>';
+
+  const renameBtn = document.getElementById('btn-ct-rename');
+  if (renameBtn) {
+    renameBtn.onclick = async () => {
+      await promptTagCommunityName(region, spotName || projectName, projectName, road, doorAddr);
+      modal.classList.add('hidden');
+    };
+  }
+
+  try {
+    const params = new URLSearchParams();
+    if (region) params.set('region', region);
+    if (projectName) params.set('project_name', projectName);
+    if (spotName) params.set('spot_name', spotName);
+    if (road) params.set('road', road);
+    if (doorAddr) params.set('door_addr', doorAddr);
+
+    const res = await apiFetch(`/api/community/trend?${params.toString()}`);
+    const data = await res.json();
+
+    document.getElementById('ct-title').innerText = data.display_name || projectName || spotName;
+    document.getElementById('ct-region-badge').innerText = `${data.region || region || ''} ${data.road || ''}`;
+
+    const specs = [];
+    if (data.building_type) specs.push(data.building_type);
+    if (data.avg_age !== null && data.avg_age !== undefined) {
+      specs.push(`屋齡 ${data.avg_age} 年${data.build_year ? ` (${data.build_year}年完工)` : ''}`);
+    } else if (data.build_year) {
+      specs.push(`${data.build_year}年完工`);
+    }
+    if (data.total_floors) specs.push(`總樓層 ${data.total_floors}`);
+    if (data.summary && data.summary.avg_building_ping) specs.push(`均建坪 ${data.summary.avg_building_ping} 坪`);
+    if (data.summary && data.summary.avg_land_ping) specs.push(`均地坪 ${data.summary.avg_land_ping} 坪`);
+    document.getElementById('ct-spec-badge').innerText = specs.join(' ｜ ');
+
+    const doors = data.doors || [];
+    document.getElementById('ct-doors-list').innerText = doors.length > 0
+      ? `${doors.join('、')}${data.door_count > doors.length ? ` ... (共 ${data.door_count} 個門牌)` : ` (共 ${doors.length} 個門牌)`}`
+      : (spotName || '--');
+
+    const s = data.summary || {};
+    document.getElementById('ct-kpi-latest-price').innerText = s.latest_avg_price ? `${s.latest_avg_price} 萬/坪` : '--';
+    document.getElementById('ct-kpi-latest-period').innerText = s.latest_period ? `最新季度: ${s.latest_period}` : '--';
+    document.getElementById('ct-kpi-net-price').innerText = s.latest_net_price ? `${s.latest_net_price} 萬/坪` : (s.latest_avg_price ? `${s.latest_avg_price} 萬/坪` : '--');
+
+    const chg = Number(s.all_time_change_pct || 0);
+    const chgEl = document.getElementById('ct-kpi-change');
+    chgEl.innerText = `${chg > 0 ? '+' : ''}${chg.toFixed(1)}%`;
+    chgEl.className = `text-lg font-bold mt-0.5 ${chg > 0 ? 'text-red-400' : (chg < 0 ? 'text-emerald-400' : 'text-slate-300')}`;
+    document.getElementById('ct-kpi-first-price').innerText = s.first_period ? `首期 (${s.first_period}): ${s.first_avg_price} 萬/坪` : '--';
+
+    document.getElementById('ct-kpi-peak-price').innerText = s.peak_avg_price ? `${s.peak_avg_price} 萬/坪` : '--';
+    document.getElementById('ct-kpi-peak-period').innerText = s.peak_period ? `創高季度: ${s.peak_period}` : '--';
+    document.getElementById('ct-kpi-tx-count').innerText = `${(s.total_tx || 0).toLocaleString()} 筆`;
+    document.getElementById('ct-kpi-repeat-count').innerText = `同戶歷次轉手: ${s.repeat_sales_count || 0} 筆`;
+
+    // Render Chart.js Trend Chart
+    const qList = data.quarters || [];
+    const ctx = document.getElementById('ct-trend-chart').getContext('2d');
+    if (communityTrendChartInstance) {
+      communityTrendChartInstance.destroy();
+    }
+    communityTrendChartInstance = new Chart(ctx, {
+      data: {
+        labels: qList.map(q => q.period),
+        datasets: [
+          {
+            type: 'line',
+            label: '平均單價 (萬/坪)',
+            data: qList.map(q => q.avg_unit_price),
+            borderColor: '#34d399',
+            backgroundColor: 'rgba(52, 211, 153, 0.12)',
+            borderWidth: 2.5,
+            pointRadius: 3,
+            tension: 0.25,
+            yAxisID: 'yPrice',
+            fill: true,
+          },
+          {
+            type: 'line',
+            label: '扣車位純建坪單價 (萬/坪)',
+            data: qList.map(q => q.net_unit_price),
+            borderColor: '#22d3ee',
+            borderDash: [4, 3],
+            borderWidth: 2,
+            pointRadius: 2.5,
+            tension: 0.25,
+            yAxisID: 'yPrice',
+            fill: false,
+          },
+          {
+            type: 'bar',
+            label: '成交筆數',
+            data: qList.map(q => q.tx_count),
+            backgroundColor: 'rgba(59, 130, 246, 0.35)',
+            borderColor: 'rgba(59, 130, 246, 0.7)',
+            borderWidth: 1,
+            borderRadius: 4,
+            yAxisID: 'yVol',
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: 'rgba(15, 23, 42, 0.95)',
+            borderColor: '#334155',
+            borderWidth: 1,
+          }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#94a3b8', font: { size: 10 }, maxTicksLimit: 14 },
+            grid: { color: 'rgba(51, 65, 85, 0.25)' }
+          },
+          yPrice: {
+            type: 'linear',
+            position: 'left',
+            ticks: { color: '#34d399', font: { size: 10 }, callback: v => `${v}萬` },
+            grid: { color: 'rgba(51, 65, 85, 0.3)' }
+          },
+          yVol: {
+            type: 'linear',
+            position: 'right',
+            beginAtZero: true,
+            ticks: { color: '#60a5fa', font: { size: 10 }, stepSize: 1 },
+            grid: { drawOnChartArea: false }
+          }
+        }
+      }
+    });
+
+    // Render Repeat Sales Table
+    const repeats = data.repeat_sales || [];
+    const rBody = document.getElementById('ct-repeat-tbody');
+    if (repeats.length === 0) {
+      rBody.innerHTML = '<tr><td colspan="6" class="py-4 text-center text-slate-500">目前此建案尚無同門牌同樓層之二次轉手紀錄</td></tr>';
+    } else {
+      rBody.innerHTML = repeats.map(r => {
+        const isGain = r.profit_wan >= 0;
+        const sign = r.profit_wan > 0 ? '+' : '';
+        const clr = r.profit_wan > 0 ? 'text-red-400' : (r.profit_wan < 0 ? 'text-emerald-400' : 'text-slate-300');
+        return `
+          <tr class="hover:bg-slate-900/70 transition">
+            <td class="py-2 font-semibold text-white">${r.unit_label}</td>
+            <td class="py-2 text-slate-300">${r.area_ping ? `${r.area_ping} 坪` : '--'}</td>
+            <td class="py-2 text-slate-300">
+              <span class="font-mono text-slate-400">${r.prev_date}</span> · 
+              <b>${r.prev_total_wan.toLocaleString()} 萬</b> (${r.prev_unit_price} 萬/坪)
+            </td>
+            <td class="py-2 text-slate-200">
+              <span class="font-mono text-slate-400">${r.curr_date}</span> · 
+              <b>${r.curr_total_wan.toLocaleString()} 萬</b> (${r.curr_unit_price} 萬/坪)
+            </td>
+            <td class="py-2 text-slate-400">${r.hold_years ? `約 ${r.hold_years} 年` : '--'}</td>
+            <td class="py-2 text-right font-bold ${clr}">
+              ${sign}${r.profit_wan.toLocaleString()} 萬 (${sign}${r.profit_pct}%)
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+  } catch (err) {
+    console.error('Failed to load community trend:', err);
+    document.getElementById('ct-spec-badge').innerText = '載入失敗';
+  }
+}
+
 // Expose handlers globally for HTML attributes and popups
 window.openTransactionDrawer = openTransactionDrawer;
+window.openCommunityTrendModal = openCommunityTrendModal;
+window.promptTagCommunityName = promptTagCommunityName;
 window.selectRegion = selectRegion;
 

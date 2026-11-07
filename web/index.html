@@ -625,6 +625,104 @@
     </div>
   </div>
 
+  <!-- Community / Building Project Historical Price Trend & Repeat Sales Modal -->
+  <div id="community-trend-modal" class="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-[100001] hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-6xl w-full max-h-[92vh] flex flex-col shadow-2xl overflow-hidden">
+      <!-- Header -->
+      <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/70">
+        <div class="flex items-center gap-3 flex-wrap">
+          <span class="px-2.5 py-1 rounded-lg bg-purple-950/80 border border-purple-700/60 text-purple-300 text-xs font-semibold">🏢 建案行情走勢</span>
+          <h3 id="ct-title" class="text-lg font-bold text-white">--</h3>
+          <span id="ct-region-badge" class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">--</span>
+          <span id="ct-spec-badge" class="text-xs text-slate-400">--</span>
+          <button id="btn-ct-rename" class="text-[11px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 transition" title="標註或修改此門牌對應之建案名稱">
+            🏷️ 標註/修改建案名
+          </button>
+        </div>
+        <button id="btn-close-ct-modal" class="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <!-- Body -->
+      <div class="flex-1 overflow-y-auto p-6 space-y-6">
+        <!-- Doors & KPI Row -->
+        <div id="ct-doors-bar" class="text-xs text-slate-400 bg-slate-950/60 border border-slate-800/80 rounded-xl px-3.5 py-2 flex items-center gap-2 flex-wrap">
+          <span class="text-slate-500 font-medium">📍 涵蓋門牌歸戶:</span>
+          <span id="ct-doors-list" class="text-slate-300 font-mono">--</span>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div class="bg-slate-950/80 border border-slate-800 rounded-xl p-3">
+            <div class="text-[11px] text-slate-400">最新成交均價 (含車位)</div>
+            <div id="ct-kpi-latest-price" class="text-lg font-bold text-emerald-400 mt-0.5">--</div>
+            <div id="ct-kpi-latest-period" class="text-[10px] text-slate-500 mt-0.5">--</div>
+          </div>
+          <div class="bg-slate-950/80 border border-slate-800 rounded-xl p-3">
+            <div class="text-[11px] text-slate-400">扣除車位純建坪單價</div>
+            <div id="ct-kpi-net-price" class="text-lg font-bold text-cyan-400 mt-0.5">--</div>
+            <div class="text-[10px] text-slate-500 mt-0.5">排除車位坪數與總價稀釋</div>
+          </div>
+          <div class="bg-slate-950/80 border border-slate-800 rounded-xl p-3">
+            <div class="text-[11px] text-slate-400">歷史累計漲跌幅</div>
+            <div id="ct-kpi-change" class="text-lg font-bold text-amber-400 mt-0.5">--</div>
+            <div id="ct-kpi-first-price" class="text-[10px] text-slate-500 mt-0.5">--</div>
+          </div>
+          <div class="bg-slate-950/80 border border-slate-800 rounded-xl p-3">
+            <div class="text-[11px] text-slate-400">社區最高成交單價</div>
+            <div id="ct-kpi-peak-price" class="text-lg font-bold text-rose-400 mt-0.5">--</div>
+            <div id="ct-kpi-peak-period" class="text-[10px] text-slate-500 mt-0.5">--</div>
+          </div>
+          <div class="bg-slate-950/80 border border-slate-800 rounded-xl p-3">
+            <div class="text-[11px] text-slate-400">歷史累計成交 / 同戶轉手</div>
+            <div id="ct-kpi-tx-count" class="text-lg font-bold text-blue-400 mt-0.5">--</div>
+            <div id="ct-kpi-repeat-count" class="text-[10px] text-slate-500 mt-0.5">--</div>
+          </div>
+        </div>
+
+        <!-- Price & Volume Trend Chart -->
+        <div class="bg-slate-950/90 border border-slate-800 rounded-2xl p-4">
+          <div class="flex items-center justify-between mb-3">
+            <h4 class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+              <span>📈 歷季成交單價走勢 (萬/坪) 與成交量</span>
+            </h4>
+            <div class="flex items-center gap-3 text-[11px] text-slate-400">
+              <span class="inline-flex items-center gap-1"><span class="w-2.5 h-0.5 bg-emerald-400 inline-block"></span>平均單價</span>
+              <span class="inline-flex items-center gap-1"><span class="w-2.5 h-0.5 bg-cyan-400 inline-block"></span>扣車位純建坪單價</span>
+              <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2 bg-blue-500/40 inline-block rounded-sm"></span>成交筆數</span>
+            </div>
+          </div>
+          <div class="h-64 w-full relative">
+            <canvas id="ct-trend-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Repeat Sales (同戶歷次轉手獲利紀錄) -->
+        <div id="ct-repeat-section" class="bg-slate-950/90 border border-slate-800 rounded-2xl p-4">
+          <h4 class="text-xs font-bold text-amber-400 mb-3 flex items-center gap-1.5">
+            <span>🔄 同戶歷次轉手獲利追蹤 (同門牌 + 同樓層歷年買賣價差)</span>
+          </h4>
+          <div class="overflow-x-auto max-h-56 overflow-y-auto">
+            <table class="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr class="border-b border-slate-800 text-slate-400 text-[11px]">
+                  <th class="py-2 font-medium">門牌與樓層</th>
+                  <th class="py-2 font-medium">移轉建坪</th>
+                  <th class="py-2 font-medium">前次入手 (日期 / 總價 / 單價)</th>
+                  <th class="py-2 font-medium">最新轉手 (日期 / 總價 / 單價)</th>
+                  <th class="py-2 font-medium">持有期間</th>
+                  <th class="py-2 font-medium text-right">帳面價差 / 漲幅</th>
+                </tr>
+              </thead>
+              <tbody id="ct-repeat-tbody" class="divide-y divide-slate-800/60">
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Crawler & Backfill Management Modal -->
   <div id="crawler-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[99999] hidden flex items-center justify-center p-4">
     <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative">
@@ -790,6 +888,6 @@
   </div>
 
   <!-- App JavaScript -->
-  <script src="/static/app.js?v=20261107_1019"></script>
+  <script src="/static/app.js?v=20261107_1132"></script>
 </body>
 </html>

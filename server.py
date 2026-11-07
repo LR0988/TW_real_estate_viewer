@@ -1160,67 +1160,96 @@ def get_transactions(
 def search_and_locate(q: str = Query(..., min_length=1)):
     """
     Intelligent search and geocoding endpoint for full addresses, buildings, and roads.
-    Takes freeform queries like '新竹市中山路46號14樓', '關新路248號', '春福承曦',
+    Takes freeform queries like '新竹市中山路46號14樓', '關新路248號', '春福承曦', '晴空匯',
     parses location components, finds or geocodes real GPS coordinates,
     and returns transaction history and statistics across all history.
     """
     conn = get_connection()
     cur = conn.cursor()
 
-    kw_where, kw_params = parse_smart_keyword(q)
+    # Fast path: Check community_master / agg_spot_quarter by project_name first
+    cm_row = cur.execute("""
+        SELECT full_district, road, spot_name, project_name,
+               SUM(tx_count) as total_tx,
+               ROUND(SUM(avg_unit_price * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_u,
+               ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_t,
+               MIN(period) as min_p,
+               MAX(period) as max_p
+        FROM agg_spot_quarter
+        WHERE project_name = ? OR project_name LIKE ? OR spot_name = ?
+        GROUP BY full_district, COALESCE(NULLIF(project_name, ''), spot_name)
+        ORDER BY CASE WHEN project_name = ? OR spot_name = ? THEN 0 ELSE 1 END, total_tx DESC
+        LIMIT 1
+    """, (q.strip(), f"%{q.strip()}%", q.strip(), q.strip(), q.strip())).fetchone()
 
-    count_query = f"""
-        SELECT COUNT(*),
-               ROUND(AVG(unit_price_wan_ping), 2),
-               ROUND(AVG(total_price_wan), 1),
-               MIN(trade_date),
-               MAX(trade_date)
-        FROM transactions
-        WHERE {kw_where} AND is_special_trade = 0
-    """
-    cur.execute(count_query, kw_params)
-    row = cur.fetchone()
-    total_tx = row[0] if row else 0
-    avg_unit_price = row[1] if row else 0.0
-    avg_total_price = row[2] if row else 0.0
-    min_date = row[3] if row else None
-    max_date = row[4] if row else None
-
-    sample_query = f"""
-        SELECT id, trade_date, trade_quarter, county_name, district, full_district,
-               road, project_name, address, target_type, building_type, floor, total_floors,
-               building_area_ping, land_area_ping, total_price_wan, unit_price_wan_ping,
-               room_count, hall_count, bath_count, berth_category, berth_area_ping, berth_price, notes,
-               is_special_trade, build_year, building_age
-        FROM transactions
-        WHERE {kw_where}
-        ORDER BY trade_date DESC
-        LIMIT 25
-    """
-    cur.execute(sample_query, kw_params)
-    sample_rows = [dict(r) for r in cur.fetchall()]
-
-    target_district = ""
-    target_road = ""
-    target_name = ""
-    target_addr = ""
-
-    if sample_rows:
-        first_tx = sample_rows[0]
-        target_district = first_tx.get("full_district") or ""
-        target_road = first_tx.get("road") or ""
-        proj = first_tx.get("project_name") or ""
-        addr = first_tx.get("address") or ""
-        target_name = extract_spot_name(addr, target_road, proj)
-        target_addr = addr
+    if cm_row and cm_row[4] and cm_row[4] > 0:
+        target_district = cm_row[0]
+        target_road = cm_row[1] or ""
+        spot_nm = cm_row[2] or q.strip()
+        proj_nm = cm_row[3] or ""
+        target_name = proj_nm if proj_nm else spot_nm
+        total_tx = cm_row[4]
+        avg_unit_price = cm_row[5] or 0.0
+        avg_total_price = cm_row[6] or 0.0
+        min_date = cm_row[7]
+        max_date = cm_row[8]
+        target_addr = f"{target_district}{spot_nm}"
+        sample_rows = []
     else:
-        m_city = re.search(r"(.+?[市縣])(.+?[區鄉鎮市])?", q)
-        if m_city:
-            target_district = (m_city.group(1) or '') + (m_city.group(2) or '')
-        m_rd = re.search(r"([^\s]+?(?:路|街|大道|段))", q)
-        if m_rd:
-            target_road = m_rd.group(1)
-        target_name = q
+        kw_where, kw_params = parse_smart_keyword(q)
+
+        count_query = f"""
+            SELECT COUNT(*),
+                   ROUND(AVG(unit_price_wan_ping), 2),
+                   ROUND(AVG(total_price_wan), 1),
+                   MIN(trade_date),
+                   MAX(trade_date)
+            FROM transactions
+            WHERE {kw_where} AND is_special_trade = 0
+        """
+        cur.execute(count_query, kw_params)
+        row = cur.fetchone()
+        total_tx = row[0] if row else 0
+        avg_unit_price = row[1] if row else 0.0
+        avg_total_price = row[2] if row else 0.0
+        min_date = row[3] if row else None
+        max_date = row[4] if row else None
+
+        sample_query = f"""
+            SELECT id, trade_date, trade_quarter, county_name, district, full_district,
+                   road, project_name, address, target_type, building_type, floor, total_floors,
+                   building_area_ping, land_area_ping, total_price_wan, unit_price_wan_ping,
+                   room_count, hall_count, bath_count, berth_category, berth_area_ping, berth_price, notes,
+                   is_special_trade, build_year, building_age
+            FROM transactions
+            WHERE {kw_where}
+            ORDER BY trade_date DESC
+            LIMIT 25
+        """
+        cur.execute(sample_query, kw_params)
+        sample_rows = [dict(r) for r in cur.fetchall()]
+
+        target_district = ""
+        target_road = ""
+        target_name = ""
+        target_addr = ""
+
+        if sample_rows:
+            first_tx = sample_rows[0]
+            target_district = first_tx.get("full_district") or ""
+            target_road = first_tx.get("road") or ""
+            proj = first_tx.get("project_name") or ""
+            addr = first_tx.get("address") or ""
+            target_name = extract_spot_name(addr, target_road, proj)
+            target_addr = addr
+        else:
+            m_city = re.search(r"(.+?[市縣])(.+?[區鄉鎮市])?", q)
+            if m_city:
+                target_district = (m_city.group(1) or '') + (m_city.group(2) or '')
+            m_rd = re.search(r"([^\s]+?(?:路|街|大道|段))", q)
+            if m_rd:
+                target_road = m_rd.group(1)
+            target_name = q
 
     lat = None
     lng = None
@@ -1229,12 +1258,13 @@ def search_and_locate(q: str = Query(..., min_length=1)):
 
     if target_district:
         clean_target_name = target_name.split('(')[0].strip() if target_name else ''
+        spot_lookup = cm_row[2] if (cm_row and cm_row[2]) else target_name
         cur.execute("""
             SELECT lat, lng, match_score, source
             FROM location_coordinates
             WHERE full_district = ? AND (name = ? OR name = ? OR name = ? OR road = ?)
             ORDER BY match_score DESC LIMIT 1
-        """, (target_district, target_name, clean_target_name, target_road, target_road))
+        """, (target_district, spot_lookup, target_name, clean_target_name, target_road))
         c_row = cur.fetchone()
         if c_row:
             lat, lng, match_score, coord_source = c_row[0], c_row[1], c_row[2], c_row[3]
@@ -1772,7 +1802,6 @@ def get_top_projects(
 
     if min_age is None and max_age is None:
         where_agg = [
-            "spot_type = 'project'",
             "project_name != '' AND project_name IS NOT NULL",
             "project_name NOT LIKE '%--%'",
             "project_name NOT LIKE '%?%'"
@@ -1799,12 +1828,19 @@ def get_top_projects(
                    MAX(district) as district,
                    MAX(road) as road,
                    MAX(door_addr) as door_addr,
+                   MAX(spot_name) as spot_name,
                    SUM(tx_count) as tx_count,
                    ROUND(SUM(avg_unit_price * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_unit_price,
                    ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_total_price,
                    ROUND(MIN(min_unit_price), 2) as min_unit_price,
                    ROUND(MAX(max_unit_price), 2) as max_unit_price,
-                   MAX(building_type) as building_type
+                   MAX(building_type) as building_type,
+                   ROUND(AVG(avg_age), 1) as avg_age,
+                   MAX(build_year) as build_year,
+                   ROUND(AVG(avg_building_ping), 2) as avg_building_ping,
+                   ROUND(AVG(avg_land_ping), 2) as avg_land_ping,
+                   SUM(COALESCE(has_parking_count, 0)) as has_parking_count,
+                   MAX(berth_type) as berth_type
             FROM agg_spot_quarter
             WHERE {" AND ".join(where_agg)}
             GROUP BY project_name, full_district
@@ -1865,11 +1901,439 @@ def get_top_projects(
         d["heat_score"] = score
         d["heat_level"] = lvl
         d["type"] = "project"
-        d["name"] = d["project_name"]
+        d["name"] = d.get("spot_name") or d["project_name"]
         results.append(d)
 
     results = batch_resolve_coordinates(results, centroids)
+    for d in results:
+        d["name"] = d["project_name"]
     return {"projects": results}
+
+
+@app.get("/api/community/trend")
+def get_community_trend(
+    region: Optional[str] = Query(None),
+    project_name: Optional[str] = Query(None),
+    spot_name: Optional[str] = Query(None),
+    road: Optional[str] = Query(None),
+    door_addr: Optional[str] = Query(None),
+):
+    """
+    Returns comprehensive historical quarterly price & volume trend, net unit price (excluding parking),
+    and same-unit repeat sales profit analysis for a building project / community / door spot.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    comm_name = (project_name or "").strip()
+    s_name = (spot_name or "").strip()
+    rd = (road or "").strip()
+    d_addr = (door_addr or "").strip()
+    f_dist = (region or "").strip()
+
+    # 1. Resolve community_name from community_master if not explicitly given
+    if not comm_name and f_dist and (s_name or (rd and d_addr)):
+        lookup_door = s_name if s_name else (rd + d_addr)
+        row_cm = cur.execute("""
+            SELECT community_name, road FROM community_master
+            WHERE full_district = ? AND road_door = ?
+            LIMIT 1
+        """, (f_dist, lookup_door)).fetchone()
+        if row_cm:
+            comm_name = row_cm[0] or ""
+            if not rd and row_cm[1]:
+                rd = row_cm[1]
+
+    # Also check agg_spot_quarter if project_name was populated there
+    if not comm_name and f_dist and s_name:
+        row_asq = cur.execute("""
+            SELECT project_name, road, door_addr FROM agg_spot_quarter
+            WHERE full_district = ? AND spot_name = ? AND project_name IS NOT NULL AND project_name != ''
+            LIMIT 1
+        """, (f_dist, s_name)).fetchone()
+        if row_asq:
+            comm_name = row_asq[0] or ""
+            if not rd and row_asq[1]:
+                rd = row_asq[1]
+            if not d_addr and row_asq[2]:
+                d_addr = row_asq[2]
+
+    # 2. Collect all doors / spot_names belonging to this community
+    door_nos = set()
+    road_doors = set()
+    roads_set = set()
+    if rd:
+        roads_set.add(rd)
+    if d_addr:
+        door_nos.add(d_addr)
+    if s_name and s_name.endswith("號"):
+        road_doors.add(s_name)
+
+    if comm_name:
+        cm_sql = "SELECT full_district, road, door_no, road_door FROM community_master WHERE community_name = ?"
+        cm_params = [comm_name]
+        if f_dist:
+            cm_sql += " AND (full_district = ? OR county_name = ?)"
+            cm_params.extend([f_dist, f_dist])
+        for r_fdist, r_rd, r_dno, r_rdoor in cur.execute(cm_sql, cm_params).fetchall():
+            if not f_dist:
+                f_dist = r_fdist
+            if r_rd:
+                roads_set.add(r_rd)
+            if r_dno:
+                door_nos.add(r_dno)
+            if r_rdoor:
+                road_doors.add(r_rdoor)
+
+    # 3. Query quarterly series from agg_spot_quarter
+    if comm_name:
+        q_sql = """
+            SELECT period,
+                   SUM(tx_count) as tx_count,
+                   ROUND(SUM(avg_unit_price * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_unit_price,
+                   ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_total_price,
+                   ROUND(MIN(min_unit_price), 2) as min_unit_price,
+                   ROUND(MAX(max_unit_price), 2) as max_unit_price,
+                   MAX(building_type) as building_type,
+                   ROUND(AVG(avg_age), 1) as avg_age,
+                   MAX(build_year) as build_year,
+                   ROUND(AVG(avg_building_ping), 2) as avg_building_ping,
+                   ROUND(AVG(avg_land_ping), 2) as avg_land_ping,
+                   SUM(COALESCE(has_parking_count, 0)) as has_parking_count,
+                   MAX(berth_type) as berth_type,
+                   GROUP_CONCAT(DISTINCT spot_name) as spots_str,
+                   MAX(full_district) as fdist,
+                   MAX(road) as mroad
+            FROM agg_spot_quarter
+            WHERE (project_name = ? OR spot_name = ?)
+        """
+        q_params = [comm_name, comm_name]
+        if f_dist:
+            q_sql += " AND (full_district = ? OR county_name = ?)"
+            q_params.extend([f_dist, f_dist])
+        q_sql += " GROUP BY period ORDER BY period ASC"
+        q_rows = cur.execute(q_sql, q_params).fetchall()
+    else:
+        target_spot = s_name or (rd + d_addr) or rd
+        q_sql = """
+            SELECT period,
+                   SUM(tx_count) as tx_count,
+                   ROUND(SUM(avg_unit_price * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_unit_price,
+                   ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_total_price,
+                   ROUND(MIN(min_unit_price), 2) as min_unit_price,
+                   ROUND(MAX(max_unit_price), 2) as max_unit_price,
+                   MAX(building_type) as building_type,
+                   ROUND(AVG(avg_age), 1) as avg_age,
+                   MAX(build_year) as build_year,
+                   ROUND(AVG(avg_building_ping), 2) as avg_building_ping,
+                   ROUND(AVG(avg_land_ping), 2) as avg_land_ping,
+                   SUM(COALESCE(has_parking_count, 0)) as has_parking_count,
+                   MAX(berth_type) as berth_type,
+                   GROUP_CONCAT(DISTINCT spot_name) as spots_str,
+                   MAX(full_district) as fdist,
+                   MAX(road) as mroad
+            FROM agg_spot_quarter
+            WHERE spot_name = ?
+        """
+        q_params = [target_spot]
+        if f_dist:
+            q_sql += " AND (full_district = ? OR county_name = ?)"
+            q_params.extend([f_dist, f_dist])
+        q_sql += " GROUP BY period ORDER BY period ASC"
+        q_rows = cur.execute(q_sql, q_params).fetchall()
+
+    quarters = []
+    building_type = ""
+    build_year = None
+    avg_age = None
+    avg_b_ping = None
+    avg_l_ping = None
+    total_tx_agg = 0
+    total_parking_agg = 0
+    berth_type_str = ""
+
+    for r in q_rows:
+        d = dict(r)
+        if not f_dist and d.get("fdist"):
+            f_dist = d["fdist"]
+        if not rd and d.get("mroad"):
+            rd = d["mroad"]
+            roads_set.add(rd)
+        if d.get("spots_str"):
+            for sp in d["spots_str"].split(","):
+                if sp.endswith("號"):
+                    road_doors.add(sp)
+        if d.get("building_type"):
+            building_type = d["building_type"]
+        if d.get("build_year"):
+            build_year = d["build_year"]
+        if d.get("avg_age") is not None:
+            avg_age = d["avg_age"]
+        if d.get("avg_building_ping"):
+            avg_b_ping = d["avg_building_ping"]
+        if d.get("avg_land_ping"):
+            avg_l_ping = d["avg_land_ping"]
+        if d.get("berth_type"):
+            berth_type_str = d["berth_type"]
+        total_tx_agg += d["tx_count"] or 0
+        total_parking_agg += d["has_parking_count"] or 0
+        quarters.append({
+            "period": d["period"],
+            "tx_count": d["tx_count"],
+            "avg_unit_price": d["avg_unit_price"],
+            "net_unit_price": d["avg_unit_price"],
+            "min_unit_price": d["min_unit_price"],
+            "max_unit_price": d["max_unit_price"],
+            "avg_total_price": d["avg_total_price"],
+        })
+
+    # 4. Fetch raw transactions for this community/building to compute:
+    #    a) Net Unit Price excluding parking (扣除車位後之純建坪單價)
+    #    b) Same-Unit Repeat Sales (同戶歷次轉手獲利紀錄)
+    #    c) Detailed transaction list
+    tx_rows = []
+    tx_conditions = []
+    tx_params = []
+    if comm_name:
+        tx_conditions.append("project_name = ?")
+        tx_params.append(comm_name)
+    if roads_set:
+        r_list = list(roads_set)
+        ph = ",".join("?" for _ in r_list)
+        if f_dist:
+            tx_conditions.append(f"(road IN ({ph}) AND (full_district = ? OR county_name = ?))")
+            tx_params.extend(r_list + [f_dist, f_dist])
+        else:
+            tx_conditions.append(f"road IN ({ph})")
+            tx_params.extend(r_list)
+
+    if tx_conditions:
+        tx_sql = f"""
+            SELECT id, trade_date, trade_quarter, full_district, road, project_name, address,
+                   target_type, building_type, floor, total_floors,
+                   building_area_ping, land_area_ping, total_price_wan, unit_price_wan_ping,
+                   room_count, hall_count, bath_count, berth_category, berth_area_ping, berth_price,
+                   notes, is_special_trade, build_year, building_age
+            FROM transactions
+            WHERE ({" OR ".join(tx_conditions)})
+              AND target_type != '土地'
+              AND unit_price_wan_ping > 0
+            ORDER BY trade_date ASC
+        """
+        cand_rows = cur.execute(tx_sql, tx_params).fetchall()
+        for r in cand_rows:
+            tr = dict(r)
+            tr_proj = (tr.get("project_name") or "").strip()
+            clean_addr = (tr.get("address") or "").translate(_NUM_MAP)
+            m_d = _DOOR_REGEX.search(clean_addr)
+            d_str = re.sub(r'(\d+)[~～\-]\d+((?:之\d+)?號)', r'\1\2', m_d.group(1)) if m_d else ""
+            r_door = (tr.get("road") or "") + d_str if d_str else ""
+
+            matched = False
+            if comm_name and tr_proj == comm_name:
+                matched = True
+            elif r_door and r_door in road_doors:
+                matched = True
+            elif d_str and d_str in door_nos:
+                matched = True
+            elif not door_nos and not road_doors and s_name and s_name in clean_addr:
+                matched = True
+
+            if matched:
+                tr["door_str"] = d_str
+                tr["road_door"] = r_door
+                # Compute net unit price excluding parking
+                b_ping = tr.get("building_area_ping") or 0.0
+                p_ping = tr.get("berth_area_ping") or 0.0
+                tot_wan = tr.get("total_price_wan") or 0.0
+                p_wan = round((tr.get("berth_price") or 0) / 10000.0, 2)
+                if p_wan > 0 and p_ping > 0 and (b_ping - p_ping) > 3.0 and (tot_wan - p_wan) > 0:
+                    net_u = round((tot_wan - p_wan) / (b_ping - p_ping), 2)
+                else:
+                    net_u = tr.get("unit_price_wan_ping") or 0.0
+                tr["net_unit_price"] = net_u
+                tr["berth_price_wan"] = p_wan
+                tx_rows.append(tr)
+
+    conn.close()
+
+    # Update quarterly net_unit_price from matched transactions
+    if tx_rows:
+        q_net_map = {}
+        for tr in tx_rows:
+            if tr.get("is_special_trade") == 1 and len(tx_rows) > 3:
+                continue
+            qp = tr.get("trade_quarter")
+            if qp and tr.get("net_unit_price"):
+                q_net_map.setdefault(qp, []).append(tr["net_unit_price"])
+        for q_item in quarters:
+            vals = q_net_map.get(q_item["period"])
+            if vals:
+                q_item["net_unit_price"] = round(sum(vals) / len(vals), 2)
+
+    # Detect Repeat Sales (同戶歷次轉手獲利)
+    repeat_sales = []
+    unit_groups = {}
+    for tr in tx_rows:
+        d_str = tr.get("door_str") or ""
+        fl = (tr.get("floor") or "").strip()
+        if not d_str or not fl or fl in ("全", "見其他登記事項"):
+            continue
+        # Group by (road_door, floor, room_count) or (road_door, floor, round(building_area_ping))
+        b_bucket = round((tr.get("building_area_ping") or 0) / 3.0)
+        u_key = (tr.get("road_door") or d_str, fl, b_bucket)
+        unit_groups.setdefault(u_key, []).append(tr)
+
+    for (r_door, fl, _), u_txs in unit_groups.items():
+        if len(u_txs) < 2:
+            continue
+        # Deduplicate same-month filings
+        dedup = [u_txs[0]]
+        for t in u_txs[1:]:
+            prev_t = dedup[-1]
+            if t["trade_date"][:7] == prev_t["trade_date"][:7] and abs(t["total_price_wan"] - prev_t["total_price_wan"]) < 10:
+                continue
+            dedup.append(t)
+        if len(dedup) < 2:
+            continue
+        for i in range(len(dedup) - 1):
+            t1 = dedup[i]
+            t2 = dedup[i + 1]
+            if t1["total_price_wan"] <= 0 or t2["total_price_wan"] <= 0:
+                continue
+            profit_wan = round(t2["total_price_wan"] - t1["total_price_wan"], 1)
+            profit_pct = round(profit_wan / t1["total_price_wan"] * 100.0, 1)
+            # Calculate holding years
+            try:
+                y1, m1 = int(t1["trade_date"][:4]), int(t1["trade_date"][5:7])
+                y2, m2 = int(t2["trade_date"][:4]), int(t2["trade_date"][5:7])
+                hold_years = round(max(0.1, (y2 - y1) + (m2 - m1) / 12.0), 1)
+            except Exception:
+                hold_years = None
+            repeat_sales.append({
+                "unit_label": f"{r_door} · {fl}",
+                "road_door": r_door,
+                "floor": fl,
+                "area_ping": t2.get("building_area_ping"),
+                "prev_date": t1["trade_date"],
+                "prev_quarter": t1["trade_quarter"],
+                "prev_total_wan": t1["total_price_wan"],
+                "prev_unit_price": t1["unit_price_wan_ping"],
+                "curr_date": t2["trade_date"],
+                "curr_quarter": t2["trade_quarter"],
+                "curr_total_wan": t2["total_price_wan"],
+                "curr_unit_price": t2["unit_price_wan_ping"],
+                "hold_years": hold_years,
+                "profit_wan": profit_wan,
+                "profit_pct": profit_pct,
+            })
+
+    repeat_sales.sort(key=lambda x: x["curr_date"], reverse=True)
+
+    # Summary KPIs
+    first_q = quarters[0] if quarters else None
+    latest_q = quarters[-1] if quarters else None
+    peak_q = max(quarters, key=lambda x: x["avg_unit_price"]) if quarters else None
+    all_time_change_pct = 0.0
+    if first_q and latest_q and first_q["avg_unit_price"] and first_q["avg_unit_price"] > 0:
+        all_time_change_pct = round(
+            (latest_q["avg_unit_price"] - first_q["avg_unit_price"]) / first_q["avg_unit_price"] * 100.0, 1
+        )
+
+    total_floors = ""
+    for tr in reversed(tx_rows):
+        if tr.get("total_floors"):
+            total_floors = tr["total_floors"]
+            break
+    if build_year and avg_age is None:
+        avg_age = float(2026 - int(build_year))
+
+    display_name = comm_name or s_name or (rd + d_addr) or rd or "未知建案"
+    doors_sorted = sorted(list(road_doors)) if road_doors else ([s_name] if s_name else [])
+
+    return {
+        "community_name": comm_name,
+        "display_name": display_name,
+        "region": f_dist,
+        "road": rd,
+        "doors": doors_sorted[:30],
+        "door_count": len(doors_sorted),
+        "building_type": building_type,
+        "build_year": build_year,
+        "avg_age": avg_age,
+        "total_floors": total_floors,
+        "summary": {
+            "total_tx": max(total_tx_agg, len(tx_rows)),
+            "first_period": first_q["period"] if first_q else None,
+            "first_avg_price": first_q["avg_unit_price"] if first_q else None,
+            "latest_period": latest_q["period"] if latest_q else None,
+            "latest_avg_price": latest_q["avg_unit_price"] if latest_q else None,
+            "latest_net_price": latest_q["net_unit_price"] if latest_q else None,
+            "all_time_change_pct": all_time_change_pct,
+            "peak_period": peak_q["period"] if peak_q else None,
+            "peak_avg_price": peak_q["avg_unit_price"] if peak_q else None,
+            "avg_building_ping": avg_b_ping,
+            "avg_land_ping": avg_l_ping,
+            "has_parking_count": total_parking_agg,
+            "berth_type": berth_type_str,
+            "repeat_sales_count": len(repeat_sales),
+        },
+        "quarters": quarters,
+        "repeat_sales": repeat_sales[:50],
+        "transactions": list(reversed(tx_rows))[:80],
+    }
+
+
+@app.post("/api/community/tag")
+def tag_community_name(
+    region: str = Query(...),
+    spot_name: str = Query(...),
+    community_name: str = Query(...),
+    road: Optional[str] = Query(""),
+    door_addr: Optional[str] = Query(""),
+):
+    """
+    Allows the user to manually label or update a spot's community/project name,
+    persisting it in community_master and agg_spot_quarter immediately.
+    """
+    cname_clean = community_name.strip()
+    if not cname_clean:
+        raise HTTPException(status_code=400, detail="建案名稱不可為空")
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Extract county_name and district from region
+    m = re.match(r"^(.+?[市縣])(.+)$", region.strip())
+    county_nm = m.group(1) if m else region
+    dist_nm = m.group(2) if m else ""
+    d_no = door_addr.strip() or extract_door_str(spot_name)
+    rd = road.strip() or spot_name.replace(d_no, "")
+    r_door = spot_name.strip()
+
+    cur.execute("""
+        INSERT OR REPLACE INTO community_master
+        (full_district, county_name, district, road, door_no, road_door, community_name, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')
+    """, (region.strip(), county_nm, dist_nm, rd, d_no, r_door, cname_clean))
+
+    cur.execute("""
+        UPDATE agg_spot_quarter
+        SET project_name = ?
+        WHERE full_district = ? AND spot_name = ?
+    """, (cname_clean, region.strip(), r_door))
+    updated_rows = cur.rowcount
+    conn.commit()
+    conn.close()
+
+    _LOCATION_HOTSPOTS_CACHE.clear()
+    return {
+        "status": "ok",
+        "region": region,
+        "spot_name": r_door,
+        "community_name": cname_clean,
+        "updated_quarters": updated_rows,
+    }
 
 
 _STATUS_CACHE: Dict[str, Any] = {}
