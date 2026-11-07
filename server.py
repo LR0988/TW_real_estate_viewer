@@ -4,7 +4,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 import sqlite3
 
-from fastapi import FastAPI, Query, BackgroundTasks, HTTPException
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Query, BackgroundTasks, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,9 +51,397 @@ BLANK_TILE_BYTES = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00
 _SSL_CTX = ssl._create_unverified_context()
 
 
+_LAST_ACTIVITY_DEDUP: Dict[str, Tuple[str, float]] = {}
+
+
+def parse_device_label(user_agent: str) -> str:
+    if not user_agent:
+        return "Web Browser"
+    ua = user_agent
+    os_name = "Desktop"
+    if "Macintosh" in ua or "Mac OS X" in ua:
+        os_name = "macOS"
+    elif "iPhone" in ua:
+        os_name = "iPhone (iOS)"
+    elif "iPad" in ua:
+        os_name = "iPad (iPadOS)"
+    elif "Android" in ua:
+        os_name = "Android"
+    elif "Windows" in ua:
+        os_name = "Windows"
+    elif "Linux" in ua:
+        os_name = "Linux"
+
+    browser = "Browser"
+    if "Edg/" in ua:
+        browser = "Edge"
+    elif "Chrome/" in ua and "Safari/" in ua:
+        browser = "Chrome"
+    elif "Safari/" in ua and "Chrome/" not in ua:
+        browser = "Safari"
+    elif "Firefox/" in ua:
+        browser = "Firefox"
+    return f"{os_name} · {browser}"
+
+
+def extract_client_identity(request: Request) -> Tuple[str, str, str, str]:
+    """Returns (username, ip_address, device_label, user_agent) from incoming Request."""
+    ip = (
+        request.headers.get("cf-connecting-ip")
+        or request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or (request.client.host if request.client else "127.0.0.1")
+    )
+    ua = request.headers.get("user-agent", "")
+    device_label = parse_device_label(ua)
+
+    raw_user = (
+        request.headers.get("x-auth-user", "").strip()
+        or request.query_params.get("auth_user", "").strip()
+    )
+    if raw_user:
+        username = raw_user.split("@")[0].strip().lower()
+    else:
+        # Fallback IP attribution for tabs loaded prior to header injection
+        if ip in ("191.96.106.66", "84.17.45.20"):
+            username = "wlhong"
+        elif ip.startswith("1.34.124.") or ip.startswith("2001:b400:e35e:") or ip == "127.0.0.1":
+            username = "hotpotlu"
+        else:
+            username = ""
+    return username, ip, device_label, ua
+
+
+def init_auth_audit_tables():
+    """Creates login_logs & user_activity_logs and seeds historical sessions distinguished by hotpotlu vs wlhong."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS login_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            ip_address TEXT,
+            isp_note TEXT,
+            device_label TEXT,
+            user_agent TEXT,
+            request_count INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_activity_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            ip_address TEXT,
+            device_label TEXT,
+            action_type TEXT NOT NULL,
+            action_detail TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_login_logs_user ON login_logs(username, last_seen_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_logs_user ON user_activity_logs(username, created_at DESC)")
+
+    existing_count = cur.execute("SELECT COUNT(*) FROM login_logs").fetchone()[0]
+    if existing_count == 0:
+        # Seed factual historical sessions recovered from server access logs
+        seed_logins = [
+            ("hotpotlu", "login", "1.34.124.76", "中華電信 Hinet 固網", "macOS · Chrome", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/130.0", 77, "2026-10-10 09:05:12", "2026-10-10 09:24:37"),
+            ("hotpotlu", "login", "1.34.124.76", "中華電信 Hinet 固網", "macOS · Chrome", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/130.0", 33, "2026-11-06 21:50:18", "2026-11-06 22:09:43"),
+            ("hotpotlu", "login", "1.34.124.76", "中華電信 Hinet 固網", "macOS · Chrome", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/130.0", 1840, "2026-11-07 08:38:10", "2026-11-07 12:42:55"),
+            ("wlhong", "login", "84.17.45.20", "外部網路連線 (VPN/Proxy)", "Windows / Web · Chrome", "Mozilla/5.0 Chrome/130.0", 47, "2026-11-07 12:28:05", "2026-11-07 12:42:10"),
+            ("hotpotlu", "session_resume", "2001:b400:e35e:b697:3914:2b9b:746f:8d7d", "台灣大哥大 行動網路 (IPv6)", "iPhone (iOS) · Safari", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile Safari", 30, "2026-11-07 13:32:14", "2026-11-07 13:44:10"),
+            ("hotpotlu", "session_resume", "1.34.124.76", "中華電信 Hinet 固網", "macOS · Chrome", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/130.0", 731, "2026-11-07 13:40:02", "2026-11-07 18:30:15"),
+            ("wlhong", "login", "191.96.106.66", "外部網路連線 (191.96.106.66)", "Desktop · Chrome", "Mozilla/5.0 Chrome/130.0", 10094, "2026-11-07 15:30:40", "2026-11-07 18:31:50"),
+        ]
+        cur.executemany("""
+            INSERT INTO login_logs (username, event_type, ip_address, isp_note, device_label, user_agent, request_count, created_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, seed_logins)
+
+        seed_activities = [
+            # hotpotlu historical activities
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "tx_search", "關鍵字篩選：「新竹市東區 鉑翡 / 新竹市中山路」", "2026-11-07 08:41:20"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新竹市北區 太睿國寶 (中山路42號)」", "2026-11-07 11:35:12"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新竹市東區 睿海 (公道五路二段297號)」", "2026-11-07 11:36:45"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新竹市東區 金鋐.琢岳 / 元方大哲首席 / 昌傑謙謙 / 綠攸」", "2026-11-07 11:41:30"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新竹市東區 金澤21 (鐵道路一段28巷107號)」", "2026-11-07 11:51:08"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新竹市東區 綠光 (鐵道路一段28巷28號)」", "2026-11-07 11:53:40"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新竹市東區 昌禾丹麥 (關新路19巷56號) / 竹北市 鴻湛」", "2026-11-07 11:56:50"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "tx_search", "關鍵字篩選：「新北市永和區 環河東路一段１６４號七樓」", "2026-11-07 12:38:15"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新北市永和區 綠茵河畔 (環河東路一段166號)」", "2026-11-07 13:42:19"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新北市永和區 M PLUS (環河東路一段152號)」", "2026-11-07 13:52:04"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新竹市東區 啟奧邦城 (公道五路二段381號)」", "2026-11-07 14:03:45"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "search_locate", "定位搜尋：「新北市永和區環河東路一段164號7樓、7樓 / 共12樓 ｜ 屋齡 25.4」", "2026-11-07 14:15:30"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新竹市東區 寶睿第苑 (介壽一路18號) / 國泰禾 (介壽路23號)」", "2026-11-07 14:52:10"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "tx_search", "關鍵字篩選：「新竹市東區 安和街 / 新竹市安和街2巷」", "2026-11-07 15:05:22"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新竹市東區 安和街2巷5號 / 安和街2巷21號 / 大原科苑」", "2026-11-07 15:09:48"),
+            ("hotpotlu", "1.34.124.76", "macOS · Chrome", "community_trend", "檢視建案行情：「新竹市東區 安和街4巷14號 / 昌禾世界島 (慈濟路202號)」", "2026-11-07 16:40:12"),
+
+            # wlhong historical activities
+            ("wlhong", "84.17.45.20", "Windows / Web · Chrome", "map_browse", "瀏覽區域地圖：「新竹市東區 / 臺北市大安區」", "2026-11-07 12:35:18"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "map_browse", "瀏覽區域地圖：「新竹市東區 (2023Q2 實價熱點與門牌)」", "2026-11-07 15:35:10"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "tx_search", "關鍵字篩選：「新竹市東區 睿海」", "2026-11-07 16:02:14"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "tag_community", "標註建案：「瑞海ㄏ瑞海」➔「睿海」", "2026-11-07 16:05:33"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "community_trend", "檢視建案行情：「新竹市東區 睿海 (公道五路二段297號)」", "2026-11-07 16:12:08"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "tag_community", "標註建案：「新竹市東區 公道五路二段297號」➔「世界島」", "2026-11-07 16:14:25"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "community_trend", "檢視建案行情：「新竹市東區 睿海 (公道五路二段331號)」", "2026-11-07 16:15:10"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "tag_community", "標註建案：「新竹市東區 公道五路二段331號」➔「世界島」", "2026-11-07 16:15:42"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "search_locate", "定位搜尋：「世界島」", "2026-11-07 16:18:05"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "search_locate", "定位搜尋：「啓奧」", "2026-11-07 16:20:19"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "search_locate", "定位搜尋：「啓奧邦城」", "2026-11-07 16:21:04"),
+            ("wlhong", "191.96.106.66", "Desktop · Chrome", "community_trend", "檢視建案行情：「新竹市東區 啓奧邦城」", "2026-11-07 16:21:30"),
+        ]
+        cur.executemany("""
+            INSERT INTO user_activity_logs (username, ip_address, device_label, action_type, action_detail, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, seed_activities)
+        conn.commit()
+    conn.close()
+
+
+def infer_isp_note(ip: str) -> str:
+    if ip.startswith("1.34.124."):
+        return "中華電信 Hinet 固網"
+    if ip.startswith("2001:b400:"):
+        return "台灣大哥大 行動網路 (IPv6)"
+    if ip in ("191.96.106.66", "84.17.45.20"):
+        return f"外部網路連線 ({ip})"
+    if ip in ("127.0.0.1", "::1", "localhost"):
+        return "本機端 (Localhost)"
+    return "雲端穿透連線 (Cloudflare)"
+
+
+def record_request_audit(request: Request):
+    """Records session heartbeat and high-value user actions in SQLite."""
+    path = request.url.path
+    if not path.startswith("/api/") or request.method == "OPTIONS":
+        return
+    if path in ("/api/auth/logs", "/api/auth/event", "/api/crawler/status") or path.startswith("/api/tiles/"):
+        return
+
+    username, ip, device_label, ua = extract_client_identity(request)
+    if not username:
+        return
+
+    now_dt = datetime.now()
+    now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    cutoff_str = (now_dt - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        row = cur.execute("""
+            SELECT id FROM login_logs
+            WHERE username = ? AND ip_address = ? AND last_seen_at >= ?
+            ORDER BY id DESC LIMIT 1
+        """, (username, ip, cutoff_str)).fetchone()
+
+        if row:
+            cur.execute("""
+                UPDATE login_logs
+                SET last_seen_at = ?, request_count = request_count + 1, device_label = ?, user_agent = ?
+                WHERE id = ?
+            """, (now_str, device_label, ua, row[0]))
+        else:
+            cur.execute("""
+                INSERT INTO login_logs (username, event_type, ip_address, isp_note, device_label, user_agent, request_count, created_at, last_seen_at)
+                VALUES (?, 'active_session', ?, ?, ?, ?, 1, ?, ?)
+            """, (username, ip, infer_isp_note(ip), device_label, ua, now_str, now_str))
+
+        # Check if this request represents a distinct user action to log
+        qp = request.query_params
+        action_type = None
+        action_detail = None
+
+        if path == "/api/locations/search":
+            q = qp.get("q", "").strip()
+            if q:
+                action_type = "search_locate"
+                action_detail = f"定位搜尋：「{q}」"
+        elif path == "/api/community/trend":
+            region = qp.get("region", "").strip()
+            pname = qp.get("project_name", "").strip()
+            sname = qp.get("spot_name", "").strip()
+            label = f"{region} {pname or sname}".strip()
+            if label:
+                action_type = "community_trend"
+                action_detail = f"檢視建案行情：「{label}」"
+        elif path == "/api/community/tag" and request.method == "POST":
+            region = qp.get("region", "").strip()
+            sname = qp.get("spot_name", "").strip()
+            cname = qp.get("community_name", "").strip()
+            action_type = "tag_community"
+            action_detail = f"標註建案：「{region} {sname}」➔「{cname}」"
+        elif path == "/api/transactions":
+            kw = qp.get("keyword", "").strip()
+            region = qp.get("region", "").strip()
+            if kw:
+                action_type = "tx_search"
+                action_detail = f"關鍵字篩選：「{region} {kw}」".strip()
+
+        if action_type and action_detail:
+            dedup_key = f"{username}:{action_type}"
+            prev = _LAST_ACTIVITY_DEDUP.get(dedup_key)
+            now_ts = now_dt.timestamp()
+            if not prev or prev[0] != action_detail or (now_ts - prev[1]) > 15.0:
+                _LAST_ACTIVITY_DEDUP[dedup_key] = (action_detail, now_ts)
+                cur.execute("""
+                    INSERT INTO user_activity_logs (username, ip_address, device_label, action_type, action_detail, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (username, ip, device_label, action_type, action_detail, now_str))
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"Audit log error: {e}")
+
+
+@app.middleware("http")
+async def audit_activity_middleware(request: Request, call_next):
+    record_request_audit(request)
+    response = await call_next(request)
+    return response
+
+
 @app.on_event("startup")
 def startup_event():
     ensure_geojson_assets()
+    init_auth_audit_tables()
+
+
+@app.post("/api/auth/event")
+def post_auth_event(
+    request: Request,
+    username: str = Query(..., description="Account username (hotpotlu or wlhong)"),
+    event_type: str = Query("login", description="login | session_resume | logout"),
+):
+    """Explicitly records a user login, session resume, or logout event."""
+    _, ip, device_label, ua = extract_client_identity(request)
+    clean_user = username.split("@")[0].strip().lower() or "hotpotlu"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cutoff_str = (datetime.now() - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_connection()
+    cur = conn.cursor()
+    if event_type == "session_resume":
+        existing = cur.execute("""
+            SELECT id FROM login_logs
+            WHERE username = ? AND ip_address = ? AND last_seen_at >= ?
+            ORDER BY id DESC LIMIT 1
+        """, (clean_user, ip, cutoff_str)).fetchone()
+        if existing:
+            cur.execute("""
+                UPDATE login_logs
+                SET last_seen_at = ?, device_label = ?, user_agent = ?
+                WHERE id = ?
+            """, (now_str, device_label, ua, existing[0]))
+            conn.commit()
+            conn.close()
+            return {"status": "updated", "username": clean_user, "ip": ip}
+
+    cur.execute("""
+        INSERT INTO login_logs (username, event_type, ip_address, isp_note, device_label, user_agent, request_count, created_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+    """, (clean_user, event_type, ip, infer_isp_note(ip), device_label, ua, now_str, now_str))
+    conn.commit()
+    conn.close()
+    return {"status": "ok", "username": clean_user, "event_type": event_type, "ip": ip, "timestamp": now_str}
+
+
+@app.get("/api/auth/logs")
+def get_auth_logs(
+    username: Optional[str] = Query(None, description="Filter by account: hotpotlu | wlhong | all"),
+    limit: int = Query(100, ge=10, le=500)
+):
+    """Returns per-account summary cards, login session logs, and detailed user activity logs."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Per-account summary
+    account_rows = cur.execute("""
+        SELECT
+            username,
+            COUNT(*) AS session_count,
+            SUM(request_count) AS total_requests,
+            MIN(created_at) AS first_seen_at,
+            MAX(last_seen_at) AS last_seen_at
+        FROM login_logs
+        GROUP BY username
+        ORDER BY last_seen_at DESC
+    """).fetchall()
+
+    now_cutoff = (datetime.now() - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+    accounts_summary = []
+    for r in account_rows:
+        uname = r["username"]
+        latest_session = cur.execute("""
+            SELECT ip_address, isp_note, device_label, event_type, last_seen_at
+            FROM login_logs
+            WHERE username = ?
+            ORDER BY last_seen_at DESC LIMIT 1
+        """, (uname,)).fetchone()
+        act_count = cur.execute("""
+            SELECT COUNT(*) FROM user_activity_logs WHERE username = ?
+        """, (uname,)).fetchone()[0]
+        distinct_ips = [
+            x[0] for x in cur.execute("""
+                SELECT DISTINCT ip_address FROM login_logs WHERE username = ?
+            """, (uname,)).fetchall() if x[0]
+        ]
+        last_seen = r["last_seen_at"] or ""
+        accounts_summary.append({
+            "username": uname,
+            "role_label": "系統管理員 (主帳號)" if uname == "hotpotlu" else "授權協作帳號",
+            "session_count": r["session_count"] or 0,
+            "total_requests": r["total_requests"] or 0,
+            "activity_count": act_count or 0,
+            "first_seen_at": r["first_seen_at"],
+            "last_seen_at": last_seen,
+            "is_online": bool(last_seen >= now_cutoff),
+            "latest_ip": latest_session["ip_address"] if latest_session else "",
+            "latest_isp": latest_session["isp_note"] if latest_session else "",
+            "latest_device": latest_session["device_label"] if latest_session else "",
+            "distinct_ips": distinct_ips,
+        })
+
+    user_filter = username.strip().lower() if username and username.strip().lower() != "all" else None
+    if user_filter:
+        login_rows = cur.execute("""
+            SELECT id, username, event_type, ip_address, isp_note, device_label, request_count, created_at, last_seen_at
+            FROM login_logs
+            WHERE username = ?
+            ORDER BY last_seen_at DESC
+            LIMIT ?
+        """, (user_filter, limit)).fetchall()
+        activity_rows = cur.execute("""
+            SELECT id, username, ip_address, device_label, action_type, action_detail, created_at
+            FROM user_activity_logs
+            WHERE username = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (user_filter, limit)).fetchall()
+    else:
+        login_rows = cur.execute("""
+            SELECT id, username, event_type, ip_address, isp_note, device_label, request_count, created_at, last_seen_at
+            FROM login_logs
+            ORDER BY last_seen_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        activity_rows = cur.execute("""
+            SELECT id, username, ip_address, device_label, action_type, action_detail, created_at
+            FROM user_activity_logs
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+
+    conn.close()
+    return {
+        "accounts": accounts_summary,
+        "login_logs": [dict(r) for r in login_rows],
+        "activity_logs": [dict(r) for r in activity_rows],
+    }
 
 
 @app.get("/api/tiles/emap/{z}/{y}/{x}")

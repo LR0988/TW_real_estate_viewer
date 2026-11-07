@@ -58,7 +58,7 @@
           <span class="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">MOI OpenData</span>
           <span id="sys-update-time-badge" class="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono flex items-center gap-1" title="系統程式與定位引擎最新更新時間">
             <span>🕒 系統更新:</span>
-            <span id="sys-update-time-text">2026-11-07 10:02</span>
+            <span id="sys-update-time-text">2026-11-07 18:37</span>
           </span>
         </h1>
         <p class="text-xs text-slate-400">成交量與變化率 • 交易單價與漲跌幅 • 路段建案深度透視 • 房市熱度評估</p>
@@ -104,12 +104,13 @@
         <span>歷史補齊管理</span>
       </button>
 
-      <!-- User Auth Badge & Logout -->
+      <!-- User Auth Badge, Activity Audit Logs & Logout -->
       <div id="user-auth-badge" class="flex items-center space-x-2 pl-2 border-l border-slate-800">
-        <div class="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700/60 text-xs text-slate-200">
+        <button id="btn-open-auth-logs" class="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700/60 hover:border-blue-500/50 text-xs text-slate-200 transition" title="查看各帳號登入與搜尋操作紀錄 (hotpotlu / wlhong)">
           <i data-lucide="shield-check" class="w-3.5 h-3.5 text-emerald-400"></i>
           <span class="font-medium" id="current-user-name">hotpotlu</span>
-        </div>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">登入紀錄</span>
+        </button>
         <button id="btn-logout" class="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition" title="登出系統">
           <i data-lucide="log-out" class="w-4 h-4"></i>
         </button>
@@ -919,6 +920,113 @@
     </div>
   </div>
 
+  <!-- Account Login & Activity Audit Modal -->
+  <div id="auth-logs-modal" class="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-[100001] hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-6xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+      <!-- Header -->
+      <div class="px-6 py-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-900/95">
+        <div class="flex items-center space-x-3">
+          <div class="w-9 h-9 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400">
+            <i data-lucide="shield-alert" class="w-5 h-5"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <span>系統帳號登入與操作軌跡紀錄</span>
+              <span class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-normal">依帳號與來源 IP 自動區分</span>
+            </h3>
+            <p class="text-xs text-slate-400">即時追蹤 <code class="text-blue-300">hotpotlu</code> 與 <code class="text-amber-300">wlhong</code> 之登入時間、來源 IP、裝置環境與查詢/標註操作明細</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <!-- Account Filter Buttons -->
+          <div class="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+            <button type="button" class="auth-log-filter-btn px-3 py-1 rounded-lg font-medium bg-blue-600 text-white transition" data-user="all">
+              全部帳號
+            </button>
+            <button type="button" class="auth-log-filter-btn px-3 py-1 rounded-lg font-medium text-slate-400 hover:text-white transition" data-user="hotpotlu">
+              👤 hotpotlu
+            </button>
+            <button type="button" class="auth-log-filter-btn px-3 py-1 rounded-lg font-medium text-slate-400 hover:text-white transition" data-user="wlhong">
+              👤 wlhong
+            </button>
+          </div>
+
+          <button id="btn-refresh-auth-logs" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+            <span>重新整理</span>
+          </button>
+
+          <button id="btn-close-auth-logs" class="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Body -->
+      <div class="p-6 overflow-y-auto space-y-6 flex-1">
+        <!-- Per-Account Summary Cards -->
+        <div id="auth-accounts-cards" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Populated dynamically by app.js -->
+        </div>
+
+        <!-- Two-Column Tables: Login Sessions & User Activity Logs -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          <!-- Login & Active Sessions -->
+          <div class="lg:col-span-5 bg-slate-950/70 border border-slate-800/90 rounded-xl overflow-hidden flex flex-col">
+            <div class="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/60">
+              <div class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                <i data-lucide="key-round" class="w-3.5 h-3.5 text-blue-400"></i>
+                <span>登入與連線工作階段 (Sessions)</span>
+              </div>
+              <span id="auth-login-count-badge" class="text-[11px] text-slate-400 font-mono">-- 筆</span>
+            </div>
+            <div class="overflow-x-auto max-h-[380px] overflow-y-auto">
+              <table class="w-full text-left border-collapse text-xs">
+                <thead class="bg-slate-900/90 text-slate-400 sticky top-0 z-10 text-[11px] border-b border-slate-800">
+                  <tr>
+                    <th class="py-2.5 px-3">帳號 / 狀態</th>
+                    <th class="py-2.5 px-3">來源 IP 與電信網路</th>
+                    <th class="py-2.5 px-3">登入 ~ 最後活躍時間</th>
+                    <th class="py-2.5 px-3 text-right">API 請求</th>
+                  </tr>
+                </thead>
+                <tbody id="auth-login-logs-tbody" class="divide-y divide-slate-800/60 text-slate-300">
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Detailed Search / View / Tag Activity Trail -->
+          <div class="lg:col-span-7 bg-slate-950/70 border border-slate-800/90 rounded-xl overflow-hidden flex flex-col">
+            <div class="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/60">
+              <div class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                <i data-lucide="footprints" class="w-3.5 h-3.5 text-emerald-400"></i>
+                <span>帳號搜尋、看屋與建案標註軌跡 (Activity Trail)</span>
+              </div>
+              <span id="auth-activity-count-badge" class="text-[11px] text-slate-400 font-mono">-- 筆</span>
+            </div>
+            <div class="overflow-x-auto max-h-[380px] overflow-y-auto">
+              <table class="w-full text-left border-collapse text-xs">
+                <thead class="bg-slate-900/90 text-slate-400 sticky top-0 z-10 text-[11px] border-b border-slate-800">
+                  <tr>
+                    <th class="py-2.5 px-3">時間</th>
+                    <th class="py-2.5 px-3">帳號</th>
+                    <th class="py-2.5 px-3">動作類型</th>
+                    <th class="py-2.5 px-3">操作詳細內容</th>
+                    <th class="py-2.5 px-3">來源 IP / 裝置</th>
+                  </tr>
+                </thead>
+                <tbody id="auth-activity-logs-tbody" class="divide-y divide-slate-800/60 text-slate-300">
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Notification Toast -->
   <div id="toast" class="fixed bottom-6 right-6 bg-slate-900 border border-slate-800 text-white px-4 py-2.5 rounded-xl shadow-2xl text-xs z-[100000] hidden flex items-center space-x-2">
     <i data-lucide="info" class="w-4 h-4 text-blue-400"></i>
@@ -926,6 +1034,6 @@
   </div>
 
   <!-- App JavaScript -->
-  <script src="/static/app.js?v=20261107_1537"></script>
+  <script src="/static/app.js?v=20261107_1837"></script>
 </body>
 </html>

@@ -51,9 +51,19 @@ async function apiFetch(path, options = {}) {
   const base = (STATE.desktopBackendUrl || '').replace(/\/+$/, '');
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
   const fullUrl = path.startsWith('http://') || path.startsWith('https://') ? path : `${base}${cleanPath}`;
+  let currentAuthUser = '';
+  try {
+    const rawAuth = localStorage.getItem('tw_re_auth');
+    if (rawAuth) {
+      const parsed = JSON.parse(rawAuth);
+      if (parsed && parsed.user) currentAuthUser = parsed.user;
+    }
+  } catch (e) {}
+
   const opts = { ...options };
   opts.headers = {
     'ngrok-skip-browser-warning': 'true',
+    ...(currentAuthUser ? { 'X-Auth-User': currentAuthUser } : {}),
     ...(opts.headers || {})
   };
   try {
@@ -275,10 +285,20 @@ function initAuthAndDesktop() {
   const currentUserName = document.getElementById('current-user-name');
   const btnLogout = document.getElementById('btn-logout');
 
+  const recordAuthEvent = async (user, eventType) => {
+    if (!user) return;
+    try {
+      await apiFetch(`/api/auth/event?username=${encodeURIComponent(user)}&event_type=${encodeURIComponent(eventType)}`, {
+        method: 'POST'
+      });
+    } catch (e) {}
+  };
+
   if (checkIsAuthenticated()) {
     const auth = getStoredAuth();
     if (authModal) authModal.classList.add('hidden');
     if (currentUserName) currentUserName.innerText = auth.user;
+    recordAuthEvent(auth.user, 'session_resume');
   } else {
     if (authModal) authModal.classList.remove('hidden');
   }
@@ -351,6 +371,7 @@ function initAuthAndDesktop() {
         }));
         if (authModal) authModal.classList.add('hidden');
         if (currentUserName) currentUserName.innerText = displayUser;
+        recordAuthEvent(displayUser, 'login');
         showToast('登入成功，系統已就緒');
         await initAppData();
       } else {
@@ -361,11 +382,220 @@ function initAuthAndDesktop() {
 
   if (btnLogout) {
     btnLogout.addEventListener('click', () => {
+      const prevAuth = getStoredAuth();
+      if (prevAuth && prevAuth.user) {
+        recordAuthEvent(prevAuth.user, 'logout');
+      }
       localStorage.removeItem('tw_re_auth');
       if (authModal) authModal.classList.remove('hidden');
       showToast('已登出系統');
     });
   }
+
+  // 2.5 Account Login & Activity Audit Modal
+  const authLogsModal = document.getElementById('auth-logs-modal');
+  const btnOpenAuthLogs = document.getElementById('btn-open-auth-logs');
+  const btnCloseAuthLogs = document.getElementById('btn-close-auth-logs');
+  const btnRefreshAuthLogs = document.getElementById('btn-refresh-auth-logs');
+  const filterBtns = document.querySelectorAll('.auth-log-filter-btn');
+  let currentAuthLogFilter = 'all';
+
+  async function loadAuthLogs(userFilter = currentAuthLogFilter) {
+    currentAuthLogFilter = userFilter;
+    const cardsEl = document.getElementById('auth-accounts-cards');
+    const loginTbody = document.getElementById('auth-login-logs-tbody');
+    const activityTbody = document.getElementById('auth-activity-logs-tbody');
+    const loginCountBadge = document.getElementById('auth-login-count-badge');
+    const activityCountBadge = document.getElementById('auth-activity-count-badge');
+
+    if (loginTbody) {
+      loginTbody.innerHTML = '<tr><td colspan="4" class="py-8 text-center text-slate-500">載入登入紀錄中...</td></tr>';
+    }
+    if (activityTbody) {
+      activityTbody.innerHTML = '<tr><td colspan="5" class="py-8 text-center text-slate-500">載入操作軌跡中...</td></tr>';
+    }
+
+    try {
+      const res = await apiFetch(`/api/auth/logs?username=${encodeURIComponent(userFilter)}&limit=120`);
+      const data = await res.json();
+      const accounts = data.accounts || [];
+      const loginLogs = data.login_logs || [];
+      const activityLogs = data.activity_logs || [];
+
+      if (cardsEl) {
+        cardsEl.innerHTML = accounts.map(acc => {
+          const isHotpot = acc.username === 'hotpotlu';
+          const badgeColor = isHotpot
+            ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+            : 'bg-amber-500/15 text-amber-300 border-amber-500/30';
+          const borderAccent = isHotpot ? 'border-blue-500/30' : 'border-amber-500/30';
+          const statusDot = acc.is_online
+            ? '<span class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>在線活躍</span>'
+            : '<span class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700"><span class="w-1.5 h-1.5 rounded-full bg-slate-500"></span>離線</span>';
+
+          return `
+            <div class="bg-slate-950/80 border ${borderAccent} rounded-xl p-4 flex flex-col justify-between gap-3 shadow-inner">
+              <div class="flex items-start justify-between gap-2">
+                <div class="flex items-center gap-2.5">
+                  <div class="w-9 h-9 rounded-xl ${badgeColor} border flex items-center justify-center font-bold text-sm uppercase">
+                    ${acc.username.slice(0, 2)}
+                  </div>
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <span class="text-sm font-bold text-white font-mono">${acc.username}</span>
+                      <span class="text-[11px] px-2 py-0.5 rounded border ${badgeColor}">${acc.role_label}</span>
+                    </div>
+                    <div class="text-[11px] text-slate-400 mt-0.5">
+                      最近上線: <span class="text-slate-200 font-mono">${acc.last_seen_at || '--'}</span>
+                    </div>
+                  </div>
+                </div>
+                ${statusDot}
+              </div>
+
+              <div class="grid grid-cols-3 gap-2 bg-slate-900/80 rounded-lg p-2.5 border border-slate-800/80 text-center">
+                <div>
+                  <div class="text-[10px] text-slate-400">登入/連線階段</div>
+                  <div class="text-sm font-bold text-white font-mono mt-0.5">${acc.session_count} 次</div>
+                </div>
+                <div class="border-x border-slate-800">
+                  <div class="text-[10px] text-slate-400">搜尋/標註動作</div>
+                  <div class="text-sm font-bold text-emerald-400 font-mono mt-0.5">${acc.activity_count} 筆</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400">累計 API 請求</div>
+                  <div class="text-sm font-bold text-blue-400 font-mono mt-0.5">${(acc.total_requests || 0).toLocaleString()}</div>
+                </div>
+              </div>
+
+              <div class="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 pt-1 border-t border-slate-800/60">
+                <div>來源 IP: <span class="text-slate-200 font-mono">${acc.latest_ip || '--'}</span> <span class="text-slate-500">(${acc.latest_isp || ''})</span></div>
+                <div>裝置: <span class="text-slate-300">${acc.latest_device || '--'}</span></div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      if (loginCountBadge) loginCountBadge.textContent = `${loginLogs.length} 筆階段`;
+      if (activityCountBadge) activityCountBadge.textContent = `${activityLogs.length} 筆操作`;
+
+      const eventTypeMap = {
+        login: { label: '登入驗證', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
+        session_resume: { label: '恢復連線', cls: 'bg-blue-500/15 text-blue-300 border-blue-500/30' },
+        active_session: { label: '活躍連線', cls: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' },
+        logout: { label: '帳號登出', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' }
+      };
+
+      if (loginTbody) {
+        if (!loginLogs.length) {
+          loginTbody.innerHTML = '<tr><td colspan="4" class="py-8 text-center text-slate-500">尚無符合條件之登入紀錄</td></tr>';
+        } else {
+          loginTbody.innerHTML = loginLogs.map(r => {
+            const isHotpot = r.username === 'hotpotlu';
+            const uBadge = isHotpot
+              ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+              : 'bg-amber-500/15 text-amber-300 border-amber-500/30';
+            const ev = eventTypeMap[r.event_type] || { label: r.event_type, cls: 'bg-slate-800 text-slate-300 border-slate-700' };
+            return `
+              <tr class="hover:bg-slate-900/60 transition">
+                <td class="py-2.5 px-3 whitespace-nowrap">
+                  <div class="flex items-center gap-1.5">
+                    <span class="px-2 py-0.5 rounded border font-mono font-semibold text-[11px] ${uBadge}">${r.username}</span>
+                    <span class="px-1.5 py-0.5 rounded border text-[10px] ${ev.cls}">${ev.label}</span>
+                  </div>
+                </td>
+                <td class="py-2.5 px-3">
+                  <div class="font-mono text-slate-200 text-[11px]">${r.ip_address || '--'}</div>
+                  <div class="text-[10px] text-slate-500">${r.isp_note || ''} · ${r.device_label || ''}</div>
+                </td>
+                <td class="py-2.5 px-3 font-mono text-[11px]">
+                  <div class="text-slate-200">${r.last_seen_at || r.created_at}</div>
+                  <div class="text-[10px] text-slate-500">始於 ${r.created_at}</div>
+                </td>
+                <td class="py-2.5 px-3 text-right font-mono font-semibold text-blue-300">
+                  ${(r.request_count || 1).toLocaleString()}
+                </td>
+              </tr>
+            `;
+          }).join('');
+        }
+      }
+
+      const actionTypeMap = {
+        search_locate: { label: '📍 定位搜尋', cls: 'bg-blue-500/15 text-blue-300 border-blue-500/30' },
+        community_trend: { label: '🏢 建案行情', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
+        tag_community: { label: '🏷️ 標註建案', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/40' },
+        tx_search: { label: '🔍 實價篩選', cls: 'bg-purple-500/15 text-purple-300 border-purple-500/30' },
+        map_browse: { label: '🗺️ 地圖瀏覽', cls: 'bg-slate-800 text-slate-300 border-slate-700' }
+      };
+
+      if (activityTbody) {
+        if (!activityLogs.length) {
+          activityTbody.innerHTML = '<tr><td colspan="5" class="py-8 text-center text-slate-500">尚無符合條件之操作紀錄</td></tr>';
+        } else {
+          activityTbody.innerHTML = activityLogs.map(a => {
+            const isHotpot = a.username === 'hotpotlu';
+            const uBadge = isHotpot
+              ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+              : 'bg-amber-500/15 text-amber-300 border-amber-500/30';
+            const act = actionTypeMap[a.action_type] || { label: a.action_type, cls: 'bg-slate-800 text-slate-300 border-slate-700' };
+            return `
+              <tr class="hover:bg-slate-900/60 transition">
+                <td class="py-2.5 px-3 font-mono text-[11px] text-slate-300 whitespace-nowrap">${a.created_at}</td>
+                <td class="py-2.5 px-3 whitespace-nowrap">
+                  <span class="px-2 py-0.5 rounded border font-mono font-semibold text-[11px] ${uBadge}">${a.username}</span>
+                </td>
+                <td class="py-2.5 px-3 whitespace-nowrap">
+                  <span class="px-2 py-0.5 rounded border text-[11px] ${act.cls}">${act.label}</span>
+                </td>
+                <td class="py-2.5 px-3 text-slate-100 font-medium">${a.action_detail}</td>
+                <td class="py-2.5 px-3 font-mono text-[11px] text-slate-400 whitespace-nowrap">
+                  <div>${a.ip_address || '--'}</div>
+                  <div class="text-[10px] text-slate-500 font-sans">${a.device_label || ''}</div>
+                </td>
+              </tr>
+            `;
+          }).join('');
+        }
+      }
+    } catch (err) {
+      if (loginTbody) {
+        loginTbody.innerHTML = `<tr><td colspan="4" class="py-8 text-center text-rose-400">載入失敗: ${err.message}</td></tr>`;
+      }
+    }
+  }
+
+  if (btnOpenAuthLogs && authLogsModal) {
+    btnOpenAuthLogs.addEventListener('click', () => {
+      authLogsModal.classList.remove('hidden');
+      loadAuthLogs(currentAuthLogFilter);
+    });
+  }
+  if (btnCloseAuthLogs && authLogsModal) {
+    btnCloseAuthLogs.addEventListener('click', () => {
+      authLogsModal.classList.add('hidden');
+    });
+  }
+  if (authLogsModal) {
+    authLogsModal.addEventListener('click', (e) => {
+      if (e.target === authLogsModal) authLogsModal.classList.add('hidden');
+    });
+  }
+  if (btnRefreshAuthLogs) {
+    btnRefreshAuthLogs.addEventListener('click', () => loadAuthLogs(currentAuthLogFilter));
+  }
+  filterBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      filterBtns.forEach(b => {
+        b.classList.remove('bg-blue-600', 'text-white');
+        b.classList.add('text-slate-400');
+      });
+      btn.classList.add('bg-blue-600', 'text-white');
+      btn.classList.remove('text-slate-400');
+      loadAuthLogs(btn.dataset.user || 'all');
+    });
+  });
 
   // 3. Desktop Connection Modal & Controls
   const desktopModal = document.getElementById('desktop-modal');
