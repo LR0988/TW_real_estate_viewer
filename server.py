@@ -21,7 +21,7 @@ from geo.geo_loader import load_county_geojson, load_town_geojson, ensure_geojso
 from crawler.pipeline import crawl_latest, backfill_history
 from crawler.downloader import generate_season_list
 from analysis.heat_index import compute_market_heat_score
-from geo.geocoder import batch_resolve_coordinates, geocode_arcgis, init_geocoder_db
+from geo.geocoder import batch_resolve_coordinates, geocode_arcgis, geocode_google_maps, init_geocoder_db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("server")
@@ -898,6 +898,20 @@ def get_leaderboard(
         return {"ranking": enriched[:limit]}
 
 
+_LOCATION_HOTSPOTS_CACHE: Dict[str, Any] = {}
+_NUM_MAP = str.maketrans('０１２３４５６７８９巿Ｆｆ～－', '0123456789市FF~-')
+_HALF_TO_FULL = str.maketrans('0123456789', '０１２３４５６７８９')
+_FULL_TO_HALF = str.maketrans('０１２３４５６７８９', '0123456789')
+_DOOR_REGEX = re.compile(r'((?:(?:\d+(?:之\d+)?)巷)?(?:(?:\d+(?:之\d+)?)弄)?(?:\d+(?:[~～\-]\d+)?(?:之\d+)?號))')
+
+_CH_DIGITS = {
+    '零': 0, '〇': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,
+    '壹': 1, '貳': 2, '參': 3, '叁': 3, '肆': 4, '伍': 5, '陸': 6, '柒': 7, '捌': 8, '玖': 9,
+}
+_CH_MULTIPLIERS = {'十': 10, '拾': 10, '百': 100, '佰': 100}
+_CH_NUM_CHARS = '零〇一二三四五六七八九十百壹貳參叁肆伍陸柒捌玖拾佰'
+
+
 def int_to_chinese_numeral(n: int) -> str:
     """Converts 1-99 to Chinese numerals (e.g. 14 -> 十四, 4 -> 四, 24 -> 二十四)."""
     if n <= 0 or n >= 100:
@@ -913,95 +927,313 @@ def int_to_chinese_numeral(n: int) -> str:
 
 
 def chinese_to_int(s: str) -> Optional[int]:
-    """Converts Chinese numerals (e.g. 十四, 二十四) to integer."""
-    digits = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+    """Converts standard & uppercase Chinese numerals (e.g. 七, 十四, 一百六十四, 壹佰陸拾肆, 一六四) to integer."""
     if not s:
         return None
-    if '十' not in s:
-        return digits.get(s)
-    parts = s.split('十')
-    tens = digits.get(parts[0], 1) if parts[0] else 1
-    units = digits.get(parts[1], 0) if len(parts) > 1 and parts[1] else 0
-    return tens * 10 + units
+    s = s.strip()
+    if s.isdigit():
+        return int(s)
+    if not any(m in s for m in _CH_MULTIPLIERS):
+        if all(c in _CH_DIGITS for c in s):
+            val = 0
+            for c in s:
+                val = val * 10 + _CH_DIGITS[c]
+            return val
+        return None
+    total = 0
+    current = 0
+    for idx, c in enumerate(s):
+        if c in _CH_DIGITS:
+            current = _CH_DIGITS[c]
+        elif c in _CH_MULTIPLIERS:
+            mult = _CH_MULTIPLIERS[c]
+            if current == 0 and idx == 0 and mult == 10:
+                current = 1
+            total += current * mult
+            current = 0
+        else:
+            return None
+    total += current
+    return total if total > 0 else None
 
 
-def parse_smart_keyword(kw: str) -> Tuple[str, List[Any]]:
+def normalize_address_numerals(addr: str) -> str:
+    """
+    Normalizes full-width digits (１６４ -> 164) and Chinese numerals in doors/lanes/floors
+    (七樓 -> 7樓, 十四樓之七 -> 14樓之7, 一百六十四號 -> 164號, 七層 -> 7樓)
+    while preserving road section numerals (一段, 二段) and road names (三民路, 八德路).
+    """
+    if not addr:
+        return ""
+    s = str(addr).translate(_NUM_MAP)
+
+    # 1. Basement floors: 地下一層 -> 地下1樓
+    def _repl_b(m):
+        n = chinese_to_int(m.group(1))
+        return f"地下{n}樓" if n is not None else m.group(0)
+    s = re.sub(rf"地下([{_CH_NUM_CHARS}\d]+)[層樓]", _repl_b, s)
+
+    # 2. Compound X之Y before 號/樓/層/巷/弄/室 (e.g. 一百六十四之二號 -> 164之2號)
+    def _repl_comp(m):
+        n1 = chinese_to_int(m.group(1))
+        n2 = chinese_to_int(m.group(2))
+        unit = "樓" if m.group(3) == "層" else m.group(3)
+        if n1 is not None and n2 is not None:
+            return f"{n1}之{n2}{unit}"
+        return m.group(0)
+    s = re.sub(rf"([{_CH_NUM_CHARS}\d]+)之([{_CH_NUM_CHARS}\d]+)(號|樓|層|巷|弄|室)", _repl_comp, s)
+
+    # 3. Chinese numerals immediately before 號/樓/層/巷/弄/室
+    def _repl_unit(m):
+        n = chinese_to_int(m.group(1))
+        unit = "樓" if m.group(2) == "層" else m.group(2)
+        return f"{n}{unit}" if n is not None else m.group(0)
+    s = re.sub(rf"([{_CH_NUM_CHARS}]+)(號|樓|層|巷|弄|室)", _repl_unit, s)
+
+    # 4. Arabic digits + 層 -> 樓
+    s = re.sub(r"(\d+)層", r"\1樓", s)
+
+    # 5. Sub-unit suffix 之 + Chinese numerals (e.g. 14樓之七 -> 14樓之7)
+    def _repl_zhi(m):
+        n = chinese_to_int(m.group(1))
+        return f"之{n}" if n is not None else m.group(0)
+    s = re.sub(rf"之([{_CH_NUM_CHARS}]+)", _repl_zhi, s)
+    return s
+
+
+def normalize_floor_str(fl: str) -> str:
+    """Normalizes floor strings like '七層' -> '7樓', '十二層' -> '12樓'."""
+    if not fl:
+        return ""
+    return normalize_address_numerals(str(fl).strip())
+
+
+def extract_door_str(addr: str) -> str:
+    """Extracts normalized door string (e.g. '164號', '28巷79號') from an address or spot_name."""
+    clean_addr = normalize_address_numerals(addr or "")
+    m = _DOOR_REGEX.search(clean_addr)
+    if not m:
+        return ""
+    return re.sub(r'(\d+)[~～\-]\d+((?:之\d+)?號)', r'\1\2', m.group(1))
+
+
+def extract_spot_name(addr: str, road: str, proj: str) -> str:
+    clean_addr = normalize_address_numerals(addr or "")
+    m = _DOOR_REGEX.search(clean_addr)
+    door_str = re.sub(r'(\d+)[~～\-]\d+((?:之\d+)?號)', r'\1\2', m.group(1)) if m else ""
+    if proj and proj.strip() and proj.strip() not in ('--請選擇--', '?'):
+        p = proj.strip()
+        if door_str:
+            return f"{p} ({door_str})"
+        return p
+    if door_str:
+        return (road or '') + door_str
+    return road or clean_addr or '未知'
+
+
+def extract_spot_type(addr: str, road: str, proj: str) -> str:
+    clean_addr = normalize_address_numerals(addr or "")
+    m = _DOOR_REGEX.search(clean_addr)
+    door_str = m.group(1) if m else ''
+    if proj and proj.strip() and proj.strip() not in ('--請選擇--', '?'):
+        return 'project'
+    if door_str:
+        return 'door'
+    return 'road'
+
+
+def enrich_and_normalize_tx_rows(cur: sqlite3.Cursor, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Normalizes full-width and Chinese numerals in address/floor/total_floors and enriches
+    empty project_name from community_master so all transactions show their community name.
+    """
+    if not rows:
+        return rows
+    lookup_keys = set()
+    for r in rows:
+        r["address"] = normalize_address_numerals(r.get("address") or "")
+        r["floor"] = normalize_floor_str(r.get("floor") or "")
+        r["total_floors"] = normalize_floor_str(r.get("total_floors") or "")
+        d_str = extract_door_str(r["address"])
+        rd = (r.get("road") or "").strip()
+        r_door = rd + d_str if d_str else ""
+        r["_road_door"] = r_door
+        if not (r.get("project_name") or "").strip() and r.get("full_district") and r_door:
+            lookup_keys.add((r["full_district"], r_door))
+
+    if lookup_keys:
+        cm_map = {}
+        by_dist: Dict[str, List[str]] = {}
+        for fdist, rdoor in lookup_keys:
+            by_dist.setdefault(fdist, []).append(rdoor)
+        for fdist, rdoors in by_dist.items():
+            ph = ",".join("?" for _ in rdoors)
+            for rdoor_val, cname_val in cur.execute(
+                f"SELECT road_door, community_name FROM community_master WHERE full_district = ? AND road_door IN ({ph})",
+                [fdist] + rdoors
+            ).fetchall():
+                if cname_val:
+                    cm_map[(fdist, rdoor_val)] = cname_val
+        for r in rows:
+            if not (r.get("project_name") or "").strip():
+                mapped = cm_map.get((r.get("full_district"), r.get("_road_door")))
+                if mapped:
+                    r["project_name"] = mapped
+
+    for r in rows:
+        r.pop("_road_door", None)
+    return rows
+
+
+_SEC_NUM_TO_CH = {
+    '1段': '一段', '2段': '二段', '3段': '三段', '4段': '四段', '5段': '五段',
+    '6段': '六段', '7段': '七段', '8段': '八段', '9段': '九段'
+}
+
+
+def parse_smart_keyword(kw: str, cur: Optional[sqlite3.Cursor] = None) -> Tuple[str, List[Any]]:
     """
     Intelligently parses Taiwan real estate query strings like:
-    '新竹市中山路46號14樓', '中山路46號14F', '新竹市東區關新路248號', '春福承曦'
-    Decomposes into floors (Arabic <-> Chinese), doors (half <-> full width),
-    roads, counties, and building names.
+    '新北市永和區環河東路一段１６４號七樓', '新竹市中山路46號14樓', '綠茵河畔', '金澤21'
+    Normalizes Chinese/full-width numerals, decomposes into floors, doors, roads, districts,
+    and building names, and produces fast indexed SQL clauses.
     """
-    HALF_TO_FULL = str.maketrans('0123456789', '０１２３４５６７８９')
-    FULL_TO_HALF = str.maketrans('０１２３４５６７８９', '0123456789')
-    kw_raw = kw.strip()
-    kw_half = kw_raw.translate(FULL_TO_HALF)
+    kw_norm = normalize_address_numerals(kw.strip())
+    for k_sec, v_sec in _SEC_NUM_TO_CH.items():
+        if k_sec in kw_norm:
+            kw_norm = kw_norm.replace(k_sec, v_sec)
+
+    kw_work = kw_norm
     clauses = []
     params = []
 
-    # 1. Floor check
+    # 1. Floor check (after normalize_address_numerals, 七樓/7F/七層 is already 7樓/7F)
     fl_num = None
-    m_ar = re.search(r'(\d+)\s*(?:[樓層Ff])', kw_half)
+    m_ar = re.search(r'(\d+)\s*(?:[樓層Ff])(?:之(\d+))?', kw_work)
     if m_ar:
         fl_num = int(m_ar.group(1))
-        kw_half = kw_half[:m_ar.start()] + ' ' + kw_half[m_ar.end():]
-    else:
-        m_ch = re.search(r'([一二三四五六七八九十]+)\s*(?:[樓層])', kw_half)
-        if m_ch:
-            fl_num = chinese_to_int(m_ch.group(1))
-            kw_half = kw_half[:m_ch.start()] + ' ' + kw_half[m_ch.end():]
+        kw_work = kw_work[:m_ar.start()] + ' ' + kw_work[m_ar.end():]
 
     if fl_num:
         fl_ch = int_to_chinese_numeral(fl_num)
         fl_ar = str(fl_num)
+        fl_ar_full = fl_ar.translate(_HALF_TO_FULL)
         fl_clause = """(
-            (floor = ? OR floor = ? OR address LIKE ? OR address LIKE ?)
+            (floor = ? OR floor = ? OR address LIKE ? OR address LIKE ? OR address LIKE ?)
         """
-        fl_params = [f"{fl_ch}層", f"{fl_ar}層", f"%{fl_ch}樓%", f"%{fl_ar}樓%"]
+        fl_params = [f"{fl_ch}層", f"{fl_ar}層", f"%{fl_ch}樓%", f"%{fl_ar}樓%", f"%{fl_ar_full}樓%"]
         if fl_num < 20:
             for ex in ['二', '三', '四', '五', '六', '七', '八', '九', '2', '3', '4', '5', '6', '7', '8', '9']:
                 fl_clause += f" AND floor NOT LIKE '%{ex}{fl_ch}層%' AND address NOT LIKE '%{ex}{fl_ch}樓%'"
+        if fl_num < 10:
+            fl_clause += f" AND floor NOT LIKE '%十{fl_ch}層%' AND address NOT LIKE '%十{fl_ch}樓%' AND address NOT LIKE '%1{fl_ar}樓%' AND address NOT LIKE '%2{fl_ar}樓%'"
         fl_clause += ")"
         clauses.append(fl_clause)
         params.extend(fl_params)
 
     # 2. Door check
-    m_door = re.search(r'((?:\d+巷)?(?:\d+弄)?\d+號)', kw_half)
+    door_str = None
+    m_door = re.search(r'((?:\d+(?:之\d+)?巷)?(?:\d+(?:之\d+)?弄)?\d+(?:之\d+)?號)', kw_work)
     if m_door:
-        d_str = m_door.group(1)
-        d_h = d_str
-        d_f = d_str.translate(HALF_TO_FULL)
-        clauses.append('(address LIKE ? OR address LIKE ?)')
-        params.extend([f'%{d_h}%', f'%{d_f}%'])
-        kw_half = kw_half[:m_door.start()] + ' ' + kw_half[m_door.end():]
+        door_str = m_door.group(1)
+        kw_work = kw_work[:m_door.start()] + ' ' + kw_work[m_door.end():]
 
-    # 3. Remaining text (split county, district, road, name)
-    raw_tokens = [t.strip() for t in re.split(r'[\s,，]+', kw_half) if t.strip()]
+    # 3. Remaining text (split county, district, road, building name)
+    raw_tokens = [t.strip() for t in re.split(r'[\s,，]+', kw_work) if t.strip()]
     tokens = []
     for rt in raw_tokens:
-        m = re.match(r'^(.+?[市縣])(.+?[區鄉鎮市])?(.+)$', rt)
-        if m:
+        m = re.match(r'^(.+?[市縣])(.+?[區鄉鎮市])?(.+)?$', rt)
+        if m and (m.group(2) or m.group(3)):
             tokens.extend([g for g in m.groups() if g])
         else:
-            m2 = re.match(r'^(.+?[市縣區鄉鎮])(.+)$', rt)
+            m2 = re.match(r'^(.+?[區鄉鎮市縣])(.+?)(?:路|街|大道|段)', rt)
             if m2:
-                tokens.extend([g for g in m2.groups() if g])
+                dist_part = m2.group(1)
+                rest_part = rt[len(dist_part):]
+                tokens.extend([dist_part, rest_part])
             else:
                 tokens.append(rt)
 
+    county_tok = None
+    dist_tok = None
+    road_tok = None
+    other_tokens = []
+
     for t in tokens:
-        if any(t.endswith(s) for s in ['市', '縣', '區', '鄉', '鎮']):
-            clauses.append('(county_name LIKE ? OR full_district LIKE ? OR address LIKE ?)')
-            params.extend([f'%{t}%', f'%{t}%', f'%{t}%'])
-        elif any(t.endswith(s) for s in ['路', '街', '大道', '段']):
-            clauses.append('(road LIKE ? OR address LIKE ?)')
-            params.extend([f'%{t}%', f'%{t}%'])
+        if len(t) == 3 and t.endswith(('市', '縣')):
+            county_tok = t
+        elif len(t) >= 5 and any(c in t[:3] for c in ('市', '縣')) and t.endswith(('區', '鄉', '鎮', '市')):
+            dist_tok = t
+        elif t.endswith(('區', '鄉', '鎮')) or (t.endswith('市') and len(t) <= 4 and county_tok):
+            dist_tok = (county_tok + t) if (county_tok and not t.startswith(county_tok)) else t
+        elif any(t.endswith(s) for s in ['路', '街', '大道', '段']) or any(k in t for k in ['路一段', '路二段', '路三段', '路四段', '路五段', '街一段', '街二段']):
+            road_tok = t
         else:
-            t_f = t.translate(HALF_TO_FULL)
+            other_tokens.append(t)
+
+    # Add indexed county / full_district clause
+    if dist_tok:
+        if len(dist_tok) >= 5:
+            d_alt = dist_tok.replace('台', '臺') if '台' in dist_tok else dist_tok.replace('臺', '台')
+            if d_alt != dist_tok:
+                clauses.append('(full_district = ? OR full_district = ?)')
+                params.extend([dist_tok, d_alt])
+            else:
+                clauses.append('full_district = ?')
+                params.append(dist_tok)
+        else:
+            clauses.append('district = ?')
+            params.append(dist_tok)
+    elif county_tok:
+        c_alt = county_tok.replace('台', '臺') if '台' in county_tok else county_tok.replace('臺', '台')
+        if c_alt != county_tok:
+            clauses.append('(county_name = ? OR county_name = ?)')
+            params.extend([county_tok, c_alt])
+        else:
+            clauses.append('county_name = ?')
+            params.append(county_tok)
+
+    # Add indexed road clause
+    if road_tok:
+        clauses.append('(road = ? OR road LIKE ?)')
+        params.extend([road_tok, f'{road_tok}%'])
+
+    # Add door clause (using road prefix when available so 164號 never matches 2164號 or XX巷164號)
+    if door_str:
+        d_h = door_str
+        d_f = door_str.translate(_HALF_TO_FULL)
+        if road_tok:
+            clauses.append('(address LIKE ? OR address LIKE ?)')
+            params.extend([f'%{road_tok}{d_h}%', f'%{road_tok}{d_f}%'])
+        else:
+            clauses.append('(address LIKE ? OR address LIKE ?)')
+            params.extend([f'%{d_h}%', f'%{d_f}%'])
+
+    # Remaining tokens (building / community name or lane)
+    for t in other_tokens:
+        t_f = t.translate(_HALF_TO_FULL)
+        cm_doors = []
+        if cur is not None:
+            cm_doors = cur.execute("""
+                SELECT full_district, road, door_no FROM community_master
+                WHERE community_name = ? OR community_name LIKE ?
+                LIMIT 40
+            """, (t, f"%{t}%")).fetchall()
+        if cm_doors:
+            sub_or = ["project_name LIKE ?", "project_name LIKE ?"]
+            sub_p = [f"%{t}%", f"%{t_f}%"]
+            for cm_fdist, cm_rd, cm_dno in cm_doors:
+                if cm_rd and cm_dno:
+                    d_full = cm_dno.translate(_HALF_TO_FULL)
+                    sub_or.append("(full_district = ? AND road = ? AND (address LIKE ? OR address LIKE ?))")
+                    sub_p.extend([cm_fdist, cm_rd, f"%{cm_rd}{cm_dno}%", f"%{cm_rd}{d_full}%"])
+            clauses.append("(" + " OR ".join(sub_or) + ")")
+            params.extend(sub_p)
+        else:
             clauses.append("""(
-                address LIKE ? OR address LIKE ?
+                project_name LIKE ? OR project_name LIKE ?
+                OR address LIKE ? OR address LIKE ?
                 OR road LIKE ? OR road LIKE ?
-                OR project_name LIKE ? OR project_name LIKE ?
                 OR notes LIKE ? OR notes LIKE ?
             )""")
             params.extend([
@@ -1012,15 +1244,13 @@ def parse_smart_keyword(kw: str) -> Tuple[str, List[Any]]:
             ])
 
     if not clauses:
-        k_half = kw_raw.translate(FULL_TO_HALF)
-        k_full = kw_raw.translate(HALF_TO_FULL)
+        k_half = kw_norm
+        k_full = kw_norm.translate(_HALF_TO_FULL)
         return """(
-            address LIKE ? OR address LIKE ?
+            project_name LIKE ? OR project_name LIKE ?
+            OR address LIKE ? OR address LIKE ?
             OR road LIKE ? OR road LIKE ?
-            OR project_name LIKE ? OR project_name LIKE ?
-            OR notes LIKE ? OR notes LIKE ?
         )""", [
-            f'%{k_half}%', f'%{k_full}%',
             f'%{k_half}%', f'%{k_full}%',
             f'%{k_half}%', f'%{k_full}%',
             f'%{k_half}%', f'%{k_full}%'
@@ -1069,30 +1299,42 @@ def get_transactions(
         where_clauses.append("(county_name = ? OR full_district = ?)")
         params.extend([region, region])
 
-    # Translation tables for digits
-    HALF_TO_FULL = str.maketrans('0123456789', '０１２３４５６７８９')
-    FULL_TO_HALF = str.maketrans('０１２３４５６７８９', '0123456789')
-
     if road:
-        r_half = road.translate(FULL_TO_HALF)
-        r_full = road.translate(HALF_TO_FULL)
-        where_clauses.append("(road LIKE ? OR road LIKE ?)")
-        params.extend([f"%{r_half}%", f"%{r_full}%"])
+        r_half = normalize_address_numerals(road)
+        r_full = r_half.translate(_HALF_TO_FULL)
+        where_clauses.append("(road = ? OR road LIKE ? OR road LIKE ?)")
+        params.extend([r_half, f"%{r_half}%", f"%{r_full}%"])
 
     if project:
-        p_half = project.translate(FULL_TO_HALF)
-        p_full = project.translate(HALF_TO_FULL)
-        where_clauses.append("(project_name LIKE ? OR project_name LIKE ?)")
-        params.extend([f"%{p_half}%", f"%{p_full}%"])
+        p_half = project.translate(_FULL_TO_HALF).strip()
+        p_full = p_half.translate(_HALF_TO_FULL)
+        cm_doors = cur.execute("""
+            SELECT full_district, road, door_no FROM community_master
+            WHERE community_name = ? OR community_name LIKE ?
+            LIMIT 40
+        """, (p_half, f"%{p_half}%")).fetchall()
+        if cm_doors:
+            sub_or = ["project_name LIKE ?", "project_name LIKE ?"]
+            sub_p = [f"%{p_half}%", f"%{p_full}%"]
+            for cm_fdist, cm_rd, cm_dno in cm_doors:
+                if cm_rd and cm_dno:
+                    d_full = cm_dno.translate(_HALF_TO_FULL)
+                    sub_or.append("(full_district = ? AND road = ? AND (address LIKE ? OR address LIKE ?))")
+                    sub_p.extend([cm_fdist, cm_rd, f"%{cm_rd}{cm_dno}%", f"%{cm_rd}{d_full}%"])
+            where_clauses.append("(" + " OR ".join(sub_or) + ")")
+            params.extend(sub_p)
+        else:
+            where_clauses.append("(project_name LIKE ? OR project_name LIKE ?)")
+            params.extend([f"%{p_half}%", f"%{p_full}%"])
 
     if door:
-        d_half = door.translate(FULL_TO_HALF)
-        d_full = door.translate(HALF_TO_FULL)
+        d_half = normalize_address_numerals(door)
+        d_full = d_half.translate(_HALF_TO_FULL)
         where_clauses.append("(address LIKE ? OR address LIKE ?)")
         params.extend([f"%{d_half}%", f"%{d_full}%"])
 
     if keyword:
-        kw_where, kw_params = parse_smart_keyword(keyword)
+        kw_where, kw_params = parse_smart_keyword(keyword, cur=cur)
         if kw_where:
             where_clauses.append(f"({kw_where})")
             params.extend(kw_params)
@@ -1145,12 +1387,13 @@ def get_transactions(
         LIMIT ? OFFSET ?
     """
     query_params = list(params) + [limit, offset]
-    rows = cur.execute(query, query_params).fetchall()
+    rows = [dict(r) for r in cur.execute(query, query_params).fetchall()]
+    rows = enrich_and_normalize_tx_rows(cur, rows)
     conn.close()
 
     return {
         "total": total,
-        "items": [dict(r) for r in rows],
+        "items": rows,
         "limit": limit,
         "offset": offset
     }
@@ -1160,34 +1403,47 @@ def get_transactions(
 def search_and_locate(q: str = Query(..., min_length=1)):
     """
     Intelligent search and geocoding endpoint for full addresses, buildings, and roads.
-    Takes freeform queries like '新竹市中山路46號14樓', '關新路248號', '春福承曦', '晴空匯',
-    parses location components, finds or geocodes real GPS coordinates,
-    and returns transaction history and statistics across all history.
+    Takes freeform queries like '新北市永和區環河東路一段１６４號七樓', '新竹市中山路46號14樓', '綠茵河畔', '金澤21',
+    normalizes Chinese/full-width numerals, finds or geocodes real Google Maps GPS coordinates,
+    enriches community names (with on-demand 591 discovery), and returns transaction history.
     """
     conn = get_connection()
     cur = conn.cursor()
 
-    # Fast path: Check community_master / agg_spot_quarter by project_name first
-    cm_row = cur.execute("""
-        SELECT full_district, road, spot_name, project_name,
-               SUM(tx_count) as total_tx,
-               ROUND(SUM(avg_unit_price * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_u,
-               ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_t,
-               MIN(period) as min_p,
-               MAX(period) as max_p
-        FROM agg_spot_quarter
-        WHERE project_name = ? OR project_name LIKE ? OR spot_name = ?
-        GROUP BY full_district, COALESCE(NULLIF(project_name, ''), spot_name)
-        ORDER BY CASE WHEN project_name = ? OR spot_name = ? THEN 0 ELSE 1 END, total_tx DESC
-        LIMIT 1
-    """, (q.strip(), f"%{q.strip()}%", q.strip(), q.strip(), q.strip())).fetchone()
+    q_norm = normalize_address_numerals(q.strip())
+    for k_sec, v_sec in _SEC_NUM_TO_CH.items():
+        if k_sec in q_norm:
+            q_norm = q_norm.replace(k_sec, v_sec)
+
+    has_specific_door_or_floor = bool(re.search(r'\d+\s*[號樓層Ff]', q_norm))
+    cm_row = None
+
+    if not has_specific_door_or_floor:
+        cm_row = cur.execute("""
+            SELECT full_district, road, spot_name, project_name,
+                   SUM(tx_count) as total_tx,
+                   ROUND(SUM(avg_unit_price * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_u,
+                   ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_t,
+                   MIN(period) as min_p,
+                   MAX(period) as max_p
+            FROM agg_spot_quarter
+            WHERE project_name = ? OR project_name LIKE ? OR spot_name = ?
+            GROUP BY full_district, COALESCE(NULLIF(project_name, ''), spot_name)
+            ORDER BY CASE WHEN project_name = ? OR spot_name = ? THEN 0 ELSE 1 END, total_tx DESC
+            LIMIT 1
+        """, (q_norm, f"%{q_norm}%", q_norm, q_norm, q_norm)).fetchone()
+
+    discovered_proj = ""
+    spot_only_name = ""
 
     if cm_row and cm_row[4] and cm_row[4] > 0:
         target_district = cm_row[0]
         target_road = cm_row[1] or ""
-        spot_nm = cm_row[2] or q.strip()
+        spot_nm = cm_row[2] or q_norm
         proj_nm = cm_row[3] or ""
-        target_name = proj_nm if proj_nm else spot_nm
+        discovered_proj = proj_nm
+        spot_only_name = spot_nm
+        target_name = f"{proj_nm} ({spot_nm})" if (proj_nm and spot_nm and proj_nm != spot_nm) else (proj_nm or spot_nm)
         total_tx = cm_row[4]
         avg_unit_price = cm_row[5] or 0.0
         avg_total_price = cm_row[6] or 0.0
@@ -1196,7 +1452,7 @@ def search_and_locate(q: str = Query(..., min_length=1)):
         target_addr = f"{target_district}{spot_nm}"
         sample_rows = []
     else:
-        kw_where, kw_params = parse_smart_keyword(q)
+        kw_where, kw_params = parse_smart_keyword(q_norm, cur=cur)
 
         count_query = f"""
             SELECT COUNT(*),
@@ -1228,6 +1484,7 @@ def search_and_locate(q: str = Query(..., min_length=1)):
         """
         cur.execute(sample_query, kw_params)
         sample_rows = [dict(r) for r in cur.fetchall()]
+        sample_rows = enrich_and_normalize_tx_rows(cur, sample_rows)
 
         target_district = ""
         target_road = ""
@@ -1240,55 +1497,92 @@ def search_and_locate(q: str = Query(..., min_length=1)):
             target_road = first_tx.get("road") or ""
             proj = first_tx.get("project_name") or ""
             addr = first_tx.get("address") or ""
+            d_str = extract_door_str(addr)
+            spot_only_name = (target_road + d_str) if d_str else target_road
+
+            # On-demand 591 lookup if apartment/mansion door still has no project_name
+            b_type = first_tx.get("building_type") or ""
+            if not proj and target_district and spot_only_name and ("大樓" in b_type or "華廈" in b_type):
+                try:
+                    from scripts.backfill_unmapped_buildings import lookup_door_on_591
+                    c_nm = first_tx.get("county_name") or target_district[:3]
+                    d_nm = first_tx.get("district") or target_district[3:]
+                    found_591 = lookup_door_on_591(c_nm, d_nm, spot_only_name)
+                    if found_591:
+                        proj = found_591
+                        cur.execute("""
+                            INSERT OR REPLACE INTO community_master
+                            (full_district, county_name, district, road, door_no, road_door, community_name, source)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, '591_ondemand')
+                        """, (target_district, c_nm, d_nm, target_road, d_str, spot_only_name, proj))
+                        cur.execute("""
+                            UPDATE agg_spot_quarter SET project_name = ?
+                            WHERE full_district = ? AND spot_name = ?
+                        """, (proj, target_district, spot_only_name))
+                        conn.commit()
+                        for sr in sample_rows:
+                            if not sr.get("project_name"):
+                                sr["project_name"] = proj
+                except Exception:
+                    pass
+
+            discovered_proj = proj
             target_name = extract_spot_name(addr, target_road, proj)
             target_addr = addr
         else:
-            m_city = re.search(r"(.+?[市縣])(.+?[區鄉鎮市])?", q)
+            m_city = re.search(r"(.+?[市縣])(.+?[區鄉鎮市])?", q_norm)
             if m_city:
                 target_district = (m_city.group(1) or '') + (m_city.group(2) or '')
-            m_rd = re.search(r"([^\s]+?(?:路|街|大道|段))", q)
+            m_rd = re.search(r"([^\s]+?(?:路|街|大道|段))", q_norm)
             if m_rd:
                 target_road = m_rd.group(1)
-            target_name = q
+            target_name = q_norm
+            spot_only_name = q_norm
 
     lat = None
     lng = None
     match_score = None
     coord_source = None
 
+    spot_lookup = spot_only_name or (cm_row[2] if (cm_row and cm_row[2]) else target_name)
     if target_district:
         clean_target_name = target_name.split('(')[0].strip() if target_name else ''
-        spot_lookup = cm_row[2] if (cm_row and cm_row[2]) else target_name
         cur.execute("""
-            SELECT lat, lng, match_score, source
+            SELECT lat, lng, match_score, source, name
             FROM location_coordinates
-            WHERE full_district = ? AND (name = ? OR name = ? OR name = ? OR road = ?)
+            WHERE full_district = ? AND name IN (?, ?, ?)
             ORDER BY match_score DESC LIMIT 1
-        """, (target_district, spot_lookup, target_name, clean_target_name, target_road))
+        """, (target_district, spot_lookup, target_name, clean_target_name))
         c_row = cur.fetchone()
         if c_row:
             lat, lng, match_score, coord_source = c_row[0], c_row[1], c_row[2], c_row[3]
 
     if (lat is None or lng is None) and target_district:
-        res = geocode_arcgis(target_district, target_name or q, target_road, target_addr)
+        d_str = extract_door_str(target_addr or spot_lookup or q_norm)
+        res = geocode_google_maps(target_district, spot_lookup or target_name or q_norm, target_road, d_str)
+        if not res:
+            res = geocode_arcgis(target_district, spot_lookup or target_name or q_norm, target_road, target_addr)
         if res:
             lat, lng, match_score, coord_source = res
+            save_name = spot_lookup or target_name
             cur.execute("""
                 INSERT OR REPLACE INTO location_coordinates
                 (query_key, full_district, name, road, lat, lng, source, match_score)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (f"{target_district}_{target_name}_{target_road}", target_district, target_name, target_road, lat, lng, coord_source, match_score))
+            """, (f"{target_district}_{save_name}_{target_road}", target_district, save_name, target_road, lat, lng, coord_source, match_score))
             conn.commit()
 
     if lat is None or lng is None:
-        res = geocode_arcgis("", q, target_road, target_addr)
+        res = geocode_google_maps(target_district or "", q_norm, target_road, extract_door_str(q_norm))
+        if not res:
+            res = geocode_arcgis("", q_norm, target_road, target_addr)
         if res:
             lat, lng, match_score, coord_source = res
 
     conn.close()
 
     return {
-        "query": q,
+        "query": q_norm,
         "found": total_tx > 0 or (lat is not None),
         "total_tx": total_tx,
         "avg_unit_price": avg_unit_price,
@@ -1299,8 +1593,10 @@ def search_and_locate(q: str = Query(..., min_length=1)):
             "lng": lng,
             "full_district": target_district,
             "road": target_road,
-            "name": target_name or q,
-            "address": target_addr or q,
+            "name": target_name or q_norm,
+            "spot_name": spot_lookup or target_name or q_norm,
+            "project_name": discovered_proj,
+            "address": target_addr or q_norm,
             "match_score": match_score,
             "source": coord_source
         },
@@ -1323,35 +1619,6 @@ def get_town_centroids() -> Dict[str, List[float]]:
         except Exception:
             _TOWN_CENTROIDS_CACHE = {}
     return _TOWN_CENTROIDS_CACHE
-
-
-_NUM_MAP = str.maketrans('０１２３４５６７８９巿', '0123456789市')
-_DOOR_REGEX = re.compile(r'((?:(?:\d+(?:之\d+)?)巷)?(?:(?:\d+(?:之\d+)?)弄)?(?:\d+(?:[~～\-]\d+)?(?:之\d+)?號))')
-
-
-def extract_spot_name(addr: str, road: str, proj: str) -> str:
-    clean_addr = (addr or '').translate(_NUM_MAP)
-    m = _DOOR_REGEX.search(clean_addr)
-    door_str = m.group(1) if m else ''
-    if proj and proj.strip() and proj.strip() not in ('--請選擇--', '?'):
-        p = proj.strip()
-        if door_str:
-            return f"{p} ({door_str})"
-        return p
-    if door_str:
-        return (road or '') + door_str
-    return road or clean_addr or '未知'
-
-
-def extract_spot_type(addr: str, road: str, proj: str) -> str:
-    clean_addr = (addr or '').translate(_NUM_MAP)
-    m = _DOOR_REGEX.search(clean_addr)
-    door_str = m.group(1) if m else ''
-    if proj and proj.strip() and proj.strip() not in ('--請選擇--', '?'):
-        return 'project'
-    if door_str:
-        return 'door'
-    return 'road'
 
 
 @app.get("/api/locations/hotspots")
@@ -1945,18 +2212,62 @@ def get_community_trend(
                 rd = row_cm[1]
 
     # Also check agg_spot_quarter if project_name was populated there
+    spot_byear = None
+    spot_btype = ""
     if not comm_name and f_dist and s_name:
         row_asq = cur.execute("""
-            SELECT project_name, road, door_addr FROM agg_spot_quarter
-            WHERE full_district = ? AND spot_name = ? AND project_name IS NOT NULL AND project_name != ''
-            LIMIT 1
+            SELECT MAX(project_name), MAX(road), MAX(door_addr), MAX(build_year), MAX(building_type)
+            FROM agg_spot_quarter
+            WHERE full_district = ? AND spot_name = ?
         """, (f_dist, s_name)).fetchone()
         if row_asq:
-            comm_name = row_asq[0] or ""
+            if row_asq[0]:
+                comm_name = row_asq[0]
             if not rd and row_asq[1]:
                 rd = row_asq[1]
             if not d_addr and row_asq[2]:
                 d_addr = row_asq[2]
+            spot_byear = row_asq[3]
+            spot_btype = row_asq[4] or ""
+
+    # On-demand real-time 591 community lookup if still unmapped apartment/mansion door
+    if not comm_name and f_dist and s_name and ("大樓" in spot_btype or "華廈" in spot_btype):
+        try:
+            from scripts.backfill_unmapped_buildings import lookup_door_on_591
+            m_c = re.match(r"^(.+?[市縣])(.+)$", f_dist)
+            c_nm = m_c.group(1) if m_c else f_dist[:3]
+            d_nm = m_c.group(2) if m_c else ""
+            discovered = lookup_door_on_591(c_nm, d_nm, s_name)
+            if discovered:
+                comm_name = discovered
+                # Save for this spot and all sibling doors sharing (full_district, road, build_year)
+                if spot_byear and rd:
+                    sibs = cur.execute("""
+                        SELECT DISTINCT spot_name, door_addr FROM agg_spot_quarter
+                        WHERE full_district = ? AND road = ? AND build_year = ? AND spot_type = 'door'
+                    """, (f_dist, rd, spot_byear)).fetchall()
+                else:
+                    sibs = [(s_name, d_addr)]
+                for sib_sname, sib_daddr in sibs:
+                    cur.execute("""
+                        INSERT OR REPLACE INTO community_master
+                        (full_district, county_name, district, road, door_no, road_door, community_name, source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, '591_ondemand')
+                    """, (f_dist, c_nm, d_nm, rd, sib_daddr or "", sib_sname, comm_name))
+                if spot_byear and rd:
+                    cur.execute("""
+                        UPDATE agg_spot_quarter SET project_name = ?
+                        WHERE full_district = ? AND road = ? AND build_year = ? AND (project_name IS NULL OR project_name = '')
+                    """, (comm_name, f_dist, rd, spot_byear))
+                else:
+                    cur.execute("""
+                        UPDATE agg_spot_quarter SET project_name = ?
+                        WHERE full_district = ? AND spot_name = ?
+                    """, (comm_name, f_dist, s_name))
+                conn.commit()
+                _LOCATION_HOTSPOTS_CACHE.clear()
+        except Exception:
+            pass
 
     # 2. Collect all doors / spot_names belonging to this community
     door_nos = set()
@@ -2123,10 +2434,12 @@ def get_community_trend(
         cand_rows = cur.execute(tx_sql, tx_params).fetchall()
         for r in cand_rows:
             tr = dict(r)
+            tr["address"] = normalize_address_numerals(tr.get("address") or "")
+            tr["floor"] = normalize_floor_str(tr.get("floor") or "")
+            tr["total_floors"] = normalize_floor_str(tr.get("total_floors") or "")
             tr_proj = (tr.get("project_name") or "").strip()
-            clean_addr = (tr.get("address") or "").translate(_NUM_MAP)
-            m_d = _DOOR_REGEX.search(clean_addr)
-            d_str = re.sub(r'(\d+)[~～\-]\d+((?:之\d+)?號)', r'\1\2', m_d.group(1)) if m_d else ""
+            clean_addr = tr["address"]
+            d_str = extract_door_str(clean_addr)
             r_door = (tr.get("road") or "") + d_str if d_str else ""
 
             matched = False
@@ -2140,6 +2453,8 @@ def get_community_trend(
                 matched = True
 
             if matched:
+                if comm_name and not tr_proj:
+                    tr["project_name"] = comm_name
                 tr["door_str"] = d_str
                 tr["road_door"] = r_door
                 # Compute net unit price excluding parking
@@ -2177,11 +2492,13 @@ def get_community_trend(
     for tr in tx_rows:
         d_str = tr.get("door_str") or ""
         fl = (tr.get("floor") or "").strip()
-        if not d_str or not fl or fl in ("全", "見其他登記事項"):
+        if not d_str or not fl or fl in ("全", "全棟", "見其他登記事項"):
             continue
-        # Group by (road_door, floor, room_count) or (road_door, floor, round(building_area_ping))
+        # Preserve sub-unit suffix (e.g. 10樓之2) from normalized address if present
+        m_sub = re.search(r'(\d+樓之\d+)', tr.get("address") or "")
+        fl_key = m_sub.group(1) if m_sub else fl
         b_bucket = round((tr.get("building_area_ping") or 0) / 3.0)
-        u_key = (tr.get("road_door") or d_str, fl, b_bucket)
+        u_key = (tr.get("road_door") or d_str, fl_key, b_bucket)
         unit_groups.setdefault(u_key, []).append(tr)
 
     for (r_door, fl, _), u_txs in unit_groups.items():

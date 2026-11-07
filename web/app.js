@@ -1956,8 +1956,11 @@ async function fetchAndRenderTransactions(period, region, road, project, door) {
       const tr = document.createElement('tr');
       tr.className = 'hover:bg-slate-800/40 transition text-slate-200';
 
+      const safeProj = (it.project_name || '').replace(/'/g, "\\'");
+      const safeDist = (it.full_district || '').replace(/'/g, "\\'");
+      const safeRoad = (it.road || '').replace(/'/g, "\\'");
       const projTag = it.project_name
-        ? `<span class="inline-block px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30 ml-1">建案: ${it.project_name}</span>`
+        ? `<button onclick="openCommunityTrendModal('${safeDist}', '${safeProj}', '${safeProj}', '${safeRoad}', '')" title="點擊查看【${it.project_name}】建案價格走勢與轉手獲利" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 font-semibold border border-amber-500/30 ml-1 cursor-pointer transition">🏢 建案: ${it.project_name} 📈</button>`
         : '';
 
       const specialTag = it.is_special_trade === 1
@@ -2521,6 +2524,10 @@ function bindEvents() {
       }
 
       const loc = data.location || {};
+      const normQuery = data.query || query;
+      if (globalSearchInput && data.query) {
+        globalSearchInput.value = data.query;
+      }
       if (loc.lat && loc.lng) {
         if (STATE.map) {
           STATE.map.flyTo([loc.lat, loc.lng], 17, { animate: true, duration: 1.2 });
@@ -2536,24 +2543,39 @@ function bindEvents() {
             iconSize: [24, 24],
             iconAnchor: [12, 12]
           });
+          const sDist = (loc.full_district || '').replace(/'/g, "\\'");
+          const sProj = (loc.project_name || '').replace(/'/g, "\\'");
+          const sSpot = (loc.spot_name || loc.name || normQuery).replace(/'/g, "\\'");
+          const sRoad = (loc.road || '').replace(/'/g, "\\'");
+          const sQ = normQuery.replace(/'/g, "\\'");
+          const projLine = loc.project_name
+            ? `<div class="text-amber-300 text-xs font-semibold mt-0.5">🏢 建案：${loc.project_name}</div>`
+            : '';
           STATE.searchMarker = L.marker([loc.lat, loc.lng], { icon: pulseIcon }).addTo(STATE.map);
           STATE.searchMarker.bindPopup(`
-            <div class="p-1.5 text-xs min-w-[200px]">
-              <div class="font-bold text-sm text-white">${loc.name || query}</div>
+            <div class="p-1.5 text-xs min-w-[215px]">
+              <div class="font-bold text-sm text-white">${loc.name || normQuery}</div>
+              ${projLine}
               <div class="text-slate-300 text-[11px] mt-0.5">${loc.full_district || ''} ${loc.road || ''}</div>
               <div class="text-emerald-400 font-semibold mt-1">均價: ${data.avg_unit_price} 萬/坪 | 成交: ${data.total_tx} 筆</div>
-              <button onclick="openTransactionDrawer('全部歷史', '${loc.full_district || ''}', '${loc.road || ''}', null, null, '${query}')" 
-                class="mt-2 w-full py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px] font-medium transition">
-                查看全歷史成交明細 &rarr;
-              </button>
+              <div class="mt-2 flex flex-col gap-1.5">
+                <button onclick="openCommunityTrendModal('${sDist}', '${sProj}', '${sSpot}', '${sRoad}', '')" 
+                  class="w-full py-1 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded text-[11px] font-semibold transition">
+                  📈 建案行情與轉手獲利
+                </button>
+                <button onclick="openTransactionDrawer('全部歷史', '${sDist}', '${sRoad}', null, null, '${sQ}')" 
+                  class="w-full py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px] font-medium transition">
+                  查看全歷史成交明細 &rarr;
+                </button>
+              </div>
             </div>
           `).openPopup();
         }
       }
 
-      // Automatically open drawer in All-Time mode with this search keyword!
-      openTransactionDrawer('全部歷史', loc.full_district || null, loc.road || null, null, null, query);
-      showToast(`📍 已精準定位至：${loc.name || query} (共 ${data.total_tx} 筆歷史成交)`);
+      // Automatically open drawer in All-Time mode with normalized search keyword!
+      openTransactionDrawer('全部歷史', loc.full_district || null, loc.road || null, null, null, normQuery);
+      showToast(`📍 已精準定位至：${loc.name || normQuery} (共 ${data.total_tx} 筆歷史成交)`);
 
     } catch (err) {
       console.error('Search locate failed:', err);
