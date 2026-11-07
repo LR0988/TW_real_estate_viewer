@@ -282,31 +282,41 @@ function initAuthAndDesktop() {
       let loginSuccess = false;
       let token = 'token_' + Date.now();
 
-      // Check credentials: username hotpotlu or hotpotlu@gmail.com, password qQ!0963067171
-      if ((username === 'hotpotlu' || username === 'hotpotlu@gmail.com') && password === 'qQ!0963067171') {
+      // Check credentials:
+      // 1) hotpotlu / qQ!0963067171
+      // 2) wlhong / wlhong
+      const VALID_ACCOUNTS = {
+        'hotpotlu': 'qQ!0963067171',
+        'hotpotlu@gmail.com': 'qQ!0963067171',
+        'wlhong': 'wlhong',
+        'wlhong@gmail.com': 'wlhong'
+      };
+      if (VALID_ACCOUNTS[username] && VALID_ACCOUNTS[username] === password) {
         loginSuccess = true;
       }
 
-      // Also attempt Supabase Auth endpoint
-      try {
-        const supabaseRes = await fetch(`${SUPABASE_CONFIG.url}/auth/v1/token?grant_type=password`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': SUPABASE_CONFIG.anonKey
-          },
-          body: JSON.stringify({
-            email: username.includes('@') ? username : `${username}@gmail.com`,
-            password: password
-          })
-        });
-        const supabaseData = await supabaseRes.json();
-        if (supabaseRes.ok && supabaseData.access_token) {
-          loginSuccess = true;
-          token = supabaseData.access_token;
+      // Also attempt Supabase Auth endpoint if not already matched
+      if (!loginSuccess) {
+        try {
+          const supabaseRes = await fetch(`${SUPABASE_CONFIG.url}/auth/v1/token?grant_type=password`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'apikey': SUPABASE_CONFIG.anonKey
+            },
+            body: JSON.stringify({
+              email: username.includes('@') ? username : `${username}@gmail.com`,
+              password: password
+            })
+          });
+          const supabaseData = await supabaseRes.json();
+          if (supabaseRes.ok && supabaseData.access_token) {
+            loginSuccess = true;
+            token = supabaseData.access_token;
+          }
+        } catch (err) {
+          console.warn('Supabase auth network ping:', err);
         }
-      } catch (err) {
-        console.warn('Supabase auth network ping:', err);
       }
 
       if (submitBtn) {

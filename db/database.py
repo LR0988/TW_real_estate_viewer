@@ -213,10 +213,19 @@ def init_db(db_path: Path = DB_PATH):
         avg_total_price REAL,
         min_unit_price REAL,
         max_unit_price REAL,
+        avg_age REAL,
+        build_year INTEGER,
+        avg_building_ping REAL,
+        avg_land_ping REAL,
+        has_parking_count INTEGER,
+        berth_type TEXT,
         PRIMARY KEY (full_district, spot_name, period)
     );
     CREATE INDEX IF NOT EXISTS idx_agg_spot_p_dist ON agg_spot_quarter(period, full_district, tx_count DESC);
     CREATE INDEX IF NOT EXISTS idx_agg_spot_p_county ON agg_spot_quarter(period, county_name, tx_count DESC);
+    CREATE INDEX IF NOT EXISTS idx_agg_spot_dist_spot_period ON agg_spot_quarter(full_district, spot_name, period);
+    CREATE INDEX IF NOT EXISTS idx_agg_spot_county_spot_period ON agg_spot_quarter(county_name, spot_name, period);
+    CREATE INDEX IF NOT EXISTS idx_agg_spot_period_tx ON agg_spot_quarter(period, tx_count DESC);
     """)
 
     conn.commit()
