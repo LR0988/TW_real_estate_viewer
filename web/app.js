@@ -1134,6 +1134,39 @@ async function renderLocationHotspots(geojsonData, period, options = {}) {
         ? `${item.full_district}${item.road || ''}${item.door_addr}`
         : `${item.full_district}${item.road && !item.name.includes(item.road) ? item.road : ''}`;
 
+      // Format Age, Building Ping, Land Ping, and Parking info
+      const hasAge = item.avg_age !== null && item.avg_age !== undefined;
+      const ageText = hasAge
+        ? `${item.avg_age} 年${item.build_year ? ` (${item.build_year}年建)` : ''}`
+        : (isProject ? '預售 / 新建案' : '—');
+      const ageShort = hasAge ? `${item.avg_age}年` : (isProject ? '預售/新建' : '—');
+      const bPingText = item.avg_building_ping ? `${item.avg_building_ping} 坪${txCount > 1 ? ' (均)' : ''}` : '—';
+      const lPingText = item.avg_land_ping ? `${item.avg_land_ping} 坪${txCount > 1 ? ' (均)' : ''}` : '—';
+      const parkCnt = item.has_parking_count || 0;
+      const bType = (item.berth_type && item.berth_type !== 'nan') ? item.berth_type : '';
+      let parkingHtml = '';
+      let parkingShort = '';
+      if (txCount === 1) {
+        if (parkCnt > 0) {
+          parkingHtml = `<span class="text-sky-400 font-semibold">🚗 含車位${bType ? ` (${bType})` : ''}</span>`;
+          parkingShort = `🚗 含車位`;
+        } else {
+          parkingHtml = `<span class="text-slate-400">無車位</span>`;
+          parkingShort = `無車位`;
+        }
+      } else {
+        if (parkCnt === txCount && parkCnt > 0) {
+          parkingHtml = `<span class="text-sky-400 font-semibold">🚗 全含車位 (${parkCnt}/${txCount}筆${bType ? ` · ${bType}` : ''})</span>`;
+          parkingShort = `🚗 全含車位`;
+        } else if (parkCnt > 0) {
+          parkingHtml = `<span class="text-sky-400 font-semibold">🚗 含車位 ${parkCnt}/${txCount} 筆${bType ? ` (${bType})` : ''}</span>`;
+          parkingShort = `🚗 車位 ${parkCnt}/${txCount}筆`;
+        } else {
+          parkingHtml = `<span class="text-slate-400">無車位 (0/${txCount}筆)</span>`;
+          parkingShort = `無車位`;
+        }
+      }
+
       const hoverTip = `
         <div class="custom-tooltip-box py-1 px-2">
           <div class="flex items-center gap-1.5 text-xs font-bold text-white">
@@ -1141,6 +1174,15 @@ async function renderLocationHotspots(geojsonData, period, options = {}) {
             <span>${item.name}</span>
           </div>
           <div class="text-[11px] text-slate-300 mt-0.5">${addrSub}</div>
+          <div class="text-[10px] text-slate-300 mt-1 flex items-center flex-wrap gap-1.5 bg-slate-900/80 px-1.5 py-0.5 rounded border border-slate-700/60">
+            <span>屋齡: <b class="text-white">${ageShort}</b></span>
+            <span class="text-slate-600">|</span>
+            <span>建坪: <b class="text-white">${item.avg_building_ping || '—'}坪</b></span>
+            <span class="text-slate-600">|</span>
+            <span>地坪: <b class="text-white">${item.avg_land_ping || '—'}坪</b></span>
+            <span class="text-slate-600">|</span>
+            <span class="${parkCnt > 0 ? 'text-sky-300 font-semibold' : 'text-slate-400'}">${parkingShort}</span>
+          </div>
           <div class="text-[11px] text-slate-200 mt-1 flex items-center justify-between gap-2 border-t border-slate-700/60 pt-1">
             <span class="text-slate-400">${getMetricDisplayName(STATE.activeMetric)}:</span>
             ${metricValueHtml}
@@ -1171,7 +1213,7 @@ async function renderLocationHotspots(geojsonData, period, options = {}) {
         : '';
 
       const popupHtml = `
-        <div class="p-1.5 min-w-[230px]">
+        <div class="p-1.5 min-w-[245px]">
           <div class="flex items-center justify-between pb-1.5 mb-2 border-b border-slate-700">
             <div>
               <span class="inline-block px-1.5 py-0.5 text-[10px] rounded font-semibold ${badgeCls} mb-1">${typeBadgeText}</span>
@@ -1183,6 +1225,25 @@ async function renderLocationHotspots(geojsonData, period, options = {}) {
           </div>
 
           <table class="w-full text-xs" style="border-collapse: separate; border-spacing: 0 3px;">
+            <tr>
+              <td class="text-slate-400">屋齡</td>
+              <td class="text-right font-semibold text-amber-300">${ageText}</td>
+            </tr>
+            <tr>
+              <td class="text-slate-400">移轉建坪</td>
+              <td class="text-right font-semibold text-slate-100">${bPingText}</td>
+            </tr>
+            <tr>
+              <td class="text-slate-400">土地地坪</td>
+              <td class="text-right font-medium text-slate-200">${lPingText}</td>
+            </tr>
+            <tr>
+              <td class="text-slate-400">有無車位</td>
+              <td class="text-right">${parkingHtml}</td>
+            </tr>
+            <tr>
+              <td colspan="2"><div class="border-t border-slate-700/70 my-1"></div></td>
+            </tr>
             <tr>
               <td class="text-slate-400">成交筆數</td>
               <td class="text-right font-bold text-blue-400">${txCount.toLocaleString()} 筆</td>
@@ -1878,6 +1939,12 @@ async function fetchAndRenderTransactions(period, region, road, project, door) {
 
       const priceColor = it.unit_price_wan_ping > 60 ? 'text-red-400' : (it.unit_price_wan_ping > 35 ? 'text-amber-400' : 'text-emerald-400');
 
+      const hasPark = (it.target_type && it.target_type.includes('車位')) || (it.berth_category && it.berth_category !== 'nan') || (it.berth_area_ping > 0);
+      const bCat = (it.berth_category && it.berth_category !== 'nan') ? it.berth_category : '';
+      const parkBadge = hasPark
+        ? `<div class="mt-0.5"><span class="inline-block px-1.5 py-0.5 rounded text-[10px] bg-sky-500/20 text-sky-300 border border-sky-500/30 font-medium">🚗 含車位${bCat ? ` (${bCat})` : ''}${it.berth_area_ping > 0 ? ` · ${it.berth_area_ping}坪` : ''}</span></div>`
+        : `<div class="mt-0.5"><span class="inline-block px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700/60">無車位</span></div>`;
+
       tr.innerHTML = `
         <td class="py-2.5 text-slate-400 font-mono">${it.trade_date || '--'}</td>
         <td class="py-2.5">
@@ -1892,8 +1959,14 @@ async function fetchAndRenderTransactions(period, region, road, project, door) {
           <div class="flex items-center flex-wrap">${it.building_type || '住宅'} ${ageTag}</div>
           <div class="text-[10px] text-slate-400">${it.floor || ''} / ${it.total_floors || ''}</div>
         </td>
-        <td class="py-2.5 font-semibold text-slate-300">${it.building_area_ping || 0} 坪</td>
-        <td class="py-2.5 text-slate-400">${it.room_count}房 ${it.hall_count}廳 ${it.bath_count}衛</td>
+        <td class="py-2.5">
+          <div class="font-semibold text-slate-200">建坪: ${it.building_area_ping || 0} 坪</div>
+          <div class="text-[11px] text-slate-400 mt-0.5">地坪: ${it.land_area_ping || 0} 坪</div>
+        </td>
+        <td class="py-2.5 text-slate-300">
+          <div>${it.room_count}房 ${it.hall_count}廳 ${it.bath_count}衛</div>
+          ${parkBadge}
+        </td>
         <td class="py-2.5 text-right font-bold ${priceColor}">${it.unit_price_wan_ping} 萬/坪</td>
         <td class="py-2.5 text-right font-bold text-slate-100">${it.total_price_wan.toLocaleString()} 萬元</td>
       `;

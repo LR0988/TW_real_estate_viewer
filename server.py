@@ -1135,9 +1135,9 @@ def get_transactions(
 
     query = f"""
         SELECT id, trade_date, trade_quarter, county_name, district, full_district,
-               road, project_name, address, building_type, floor, total_floors,
-               building_area_ping, total_price_wan, unit_price_wan_ping,
-               room_count, hall_count, bath_count, berth_category, berth_price, notes,
+               road, project_name, address, target_type, building_type, floor, total_floors,
+               building_area_ping, land_area_ping, total_price_wan, unit_price_wan_ping,
+               room_count, hall_count, bath_count, berth_category, berth_area_ping, berth_price, notes,
                is_special_trade, build_year, building_age
         FROM transactions
         WHERE {where_str}
@@ -1188,9 +1188,9 @@ def search_and_locate(q: str = Query(..., min_length=1)):
 
     sample_query = f"""
         SELECT id, trade_date, trade_quarter, county_name, district, full_district,
-               road, project_name, address, building_type, floor, total_floors,
-               building_area_ping, total_price_wan, unit_price_wan_ping,
-               room_count, hall_count, bath_count, berth_category, berth_price, notes,
+               road, project_name, address, target_type, building_type, floor, total_floors,
+               building_area_ping, land_area_ping, total_price_wan, unit_price_wan_ping,
+               room_count, hall_count, bath_count, berth_category, berth_area_ping, berth_price, notes,
                is_special_trade, build_year, building_age
         FROM transactions
         WHERE {kw_where}
@@ -1405,7 +1405,9 @@ def get_location_hotspots(
                 SELECT spot_name as spot, spot_type, road, door_addr, project_name,
                        full_district, county_name, district,
                        tx_count, avg_unit_price, avg_total_price,
-                       min_unit_price, max_unit_price, building_type
+                       min_unit_price, max_unit_price, building_type,
+                       avg_age, build_year, avg_building_ping, avg_land_ping,
+                       has_parking_count, berth_type
                 FROM agg_spot_quarter
                 WHERE {" AND ".join(where_agg)}
             """
@@ -1424,7 +1426,13 @@ def get_location_hotspots(
                        ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_total_price,
                        ROUND(MIN(min_unit_price), 2) as min_unit_price,
                        ROUND(MAX(max_unit_price), 2) as max_unit_price,
-                       MAX(building_type) as building_type
+                       MAX(building_type) as building_type,
+                       ROUND(AVG(avg_age), 1) as avg_age,
+                       MAX(build_year) as build_year,
+                       ROUND(SUM(avg_building_ping * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_building_ping,
+                       ROUND(SUM(avg_land_ping * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_land_ping,
+                       SUM(has_parking_count) as has_parking_count,
+                       MAX(berth_type) as berth_type
                 FROM agg_spot_quarter
                 WHERE {" AND ".join(where_agg)}
                 GROUP BY full_district, spot_name
@@ -1440,7 +1448,8 @@ def get_location_hotspots(
                 )
                 SELECT spot as name, spot_type as type, road, door_addr, project_name,
                        full_district, county_name, district,
-                       tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
+                       tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type,
+                       avg_age, build_year, avg_building_ping, avg_land_ping, has_parking_count, berth_type
                 FROM RankedSpots
                 WHERE rn <= 15
                 ORDER BY tx_count DESC
@@ -1454,7 +1463,8 @@ def get_location_hotspots(
                 WITH AggSpots AS ({base_cte})
                 SELECT spot as name, spot_type as type, road, door_addr, project_name,
                        full_district, county_name, district,
-                       tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
+                       tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type,
+                       avg_age, build_year, avg_building_ping, avg_land_ping, has_parking_count, berth_type
                 FROM AggSpots
                 ORDER BY tx_count DESC
                 LIMIT ?
@@ -1504,7 +1514,13 @@ def get_location_hotspots(
                        ROUND(AVG(total_price_wan), 1) as avg_total_price,
                        ROUND(MIN(unit_price_wan_ping), 2) as min_unit_price,
                        ROUND(MAX(unit_price_wan_ping), 2) as max_unit_price,
-                       building_type
+                       building_type,
+                       ROUND(AVG(building_age), 1) as avg_age,
+                       MAX(build_year) as build_year,
+                       ROUND(AVG(building_area_ping), 2) as avg_building_ping,
+                       ROUND(AVG(land_area_ping), 2) as avg_land_ping,
+                       SUM(CASE WHEN target_type LIKE '%車位%' OR (berth_category IS NOT NULL AND berth_category != '' AND berth_category != 'nan') OR berth_area_ping > 0 THEN 1 ELSE 0 END) as has_parking_count,
+                       MAX(CASE WHEN berth_category IS NOT NULL AND berth_category != '' AND berth_category != 'nan' THEN berth_category ELSE '' END) as berth_type
                 FROM transactions
                 WHERE {" AND ".join(where_base)}
                 GROUP BY full_district, spot
@@ -1515,7 +1531,8 @@ def get_location_hotspots(
             )
             SELECT spot as name, spot_type as type, road, door_addr, project_name,
                    full_district, county_name, district,
-                   tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
+                   tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type,
+                   avg_age, build_year, avg_building_ping, avg_land_ping, has_parking_count, berth_type
             FROM RankedSpots
             WHERE rn <= {rn_limit}
             ORDER BY tx_count DESC
