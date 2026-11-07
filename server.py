@@ -1396,6 +1396,10 @@ def get_location_hotspots(
         elif type == "project":
             where_agg.append("spot_type = 'project'")
 
+        # When zoomed out to nationwide overview, pre-filter out 1-tx individual doors before window ranking
+        if not region and not viewport_districts:
+            where_agg.append("(spot_type = 'project' OR tx_count >= 2)")
+
         if not is_range:
             base_cte = f"""
                 SELECT spot_name as spot, spot_type, road, door_addr, project_name,
@@ -1550,6 +1554,10 @@ def get_location_hotspots(
             else:
                 reg_cond = " AND full_district = ?"
             reg_params.append(region)
+        elif viewport_districts:
+            vp_ph = ",".join("?" for _ in viewport_districts)
+            reg_cond = f" AND full_district IN ({vp_ph})"
+            reg_params.extend(viewport_districts)
 
         road_prev_map = {}
         cur.execute(f"""
@@ -1651,6 +1659,8 @@ def get_top_roads(
                 LIMIT ?
             """
         else:
+            if not region:
+                where_agg.append("tx_count >= 3")
             query = f"""
                 SELECT road, full_district, MAX(county_name) as county_name, MAX(district) as district,
                        SUM(tx_count) as tx_count,
@@ -1658,7 +1668,7 @@ def get_top_roads(
                        ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_total_price,
                        ROUND(MIN(min_unit_price), 2) as min_unit_price,
                        ROUND(MAX(max_unit_price), 2) as max_unit_price,
-                       GROUP_CONCAT(DISTINCT projects) as projects
+                       MAX(projects) as projects
                 FROM agg_road_quarter
                 WHERE {" AND ".join(where_agg)}
                 GROUP BY full_district, road
@@ -1763,6 +1773,9 @@ def get_top_projects(
             where_agg.append("(county_name = ? OR full_district = ?)")
             params.extend([region, region])
 
+        if is_range and not region:
+            where_agg.append("tx_count >= 2")
+
         query = f"""
             SELECT project_name, full_district,
                    MAX(county_name) as county_name,
@@ -1855,6 +1868,13 @@ def get_crawler_status():
     conn.close()
 
     db_size_mb = round(DB_PATH.stat().st_size / (1024 * 1024), 2) if DB_PATH.exists() else 0.0
+    from datetime import datetime
+    app_js = STATIC_DIR / "app.js"
+    latest_mtime = max(
+        Path(__file__).stat().st_mtime,
+        app_js.stat().st_mtime if app_js.exists() else 0
+    )
+    sys_updated = datetime.fromtimestamp(latest_mtime).strftime("%Y-%m-%d %H:%M:%S")
 
     return {
         "total_transactions": total_tx,
@@ -1865,6 +1885,7 @@ def get_crawler_status():
         "database_size_mb": db_size_mb,
         "crawler_running": crawler_task_state["is_running"],
         "last_crawl_result": crawler_task_state["last_result"],
+        "system_updated_at": sys_updated,
     }
 
 

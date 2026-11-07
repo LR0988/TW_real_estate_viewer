@@ -26,6 +26,7 @@ const STATE = {
   markersLayer: null,
   renderedMarkerKeys: new Set(),
   hotspotFilterSignature: '',
+  updateViewSeq: 0,
   chart: null,
   desktopBackendUrl: '',
   colorConfig: {
@@ -857,6 +858,7 @@ function updateLegend() {
 // 4. Update Map and View Layers
 async function updateView() {
   if (STATE.periods.length === 0) return;
+  const mySeq = ++STATE.updateViewSeq;
   const timeLabel = getTimeLabel();
 
   updatePeriodDisplay();
@@ -866,6 +868,7 @@ async function updateView() {
     const fetchLevel = STATE.activeLevel === 'road' ? 'town' : STATE.activeLevel;
     const res = await apiFetch(`/api/map/data?level=${fetchLevel}${getTimeParams()}${getAgeParams()}`);
     const geojsonData = await res.json();
+    if (mySeq !== STATE.updateViewSeq) return; // Ignore stale response if user already switched again!
 
     // Compute dynamic color auto-scaling if enabled
     if (STATE.colorConfig.autoScale) {
@@ -1911,6 +1914,10 @@ async function loadCrawlerStatus() {
     document.getElementById('stat-total-tx').innerText = data.total_transactions.toLocaleString();
     document.getElementById('stat-total-periods').innerText = data.total_periods;
     document.getElementById('stat-latest-date').innerText = data.latest_transaction_date || '無';
+    const sysTimeEl = document.getElementById('sys-update-time-text');
+    if (sysTimeEl && data.system_updated_at) {
+      sysTimeEl.innerText = data.system_updated_at;
+    }
 
     document.getElementById('modal-stat-records').innerText = `${data.total_transactions.toLocaleString()} 筆`;
     document.getElementById('modal-stat-seasons').innerText = `${data.completed_seasons_count} 季`;
@@ -2100,11 +2107,16 @@ function bindEvents() {
     });
   });
 
-  // Timeline Slider
+  // Timeline Slider (instant label update + 80ms debounced data load to avoid flooding on drag)
   const slider = document.getElementById('period-slider');
+  let sliderTimer = null;
   slider.addEventListener('input', (e) => {
     STATE.currentIndex = parseInt(e.target.value);
-    updateView();
+    updatePeriodDisplay();
+    if (sliderTimer) clearTimeout(sliderTimer);
+    sliderTimer = setTimeout(() => {
+      updateView();
+    }, 80);
   });
 
   // Step Prev / Next

@@ -437,7 +437,7 @@ def batch_resolve_coordinates(
     items: List[Dict],
     town_centroids: Dict[str, List[float]] = None,
     db_path: Path = DB_PATH,
-    sync_budget: int = 60
+    sync_budget: int = 0
 ) -> List[Dict]:
     """
     Enriches a list of items with verified GPS 'lat' and 'lng' coordinates from Google Maps / ArcGIS.
@@ -557,6 +557,10 @@ def batch_resolve_coordinates(
             if interp:
                 item["lat"], item["lng"], item["coord_source"] = interp
                 item["geo_exact"] = True
+            elif nm == rd and (dist, rd) in road_center_map:
+                item["lat"], item["lng"] = road_center_map[(dist, rd)]
+                item["geo_exact"] = True
+                item["coord_source"] = "gmap_street"
             else:
                 item["lat"] = None
                 item["lng"] = None

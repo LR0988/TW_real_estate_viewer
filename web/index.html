@@ -53,9 +53,13 @@
         <i data-lucide="building-2" class="w-6 h-6 text-white"></i>
       </div>
       <div>
-        <h1 class="text-lg font-bold tracking-tight flex items-center gap-2">
-          台灣房地產實價登錄觀測站
+        <h1 class="text-lg font-bold tracking-tight flex items-center flex-wrap gap-2">
+          <span>台灣房地產實價登錄觀測站</span>
           <span class="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">MOI OpenData</span>
+          <span id="sys-update-time-badge" class="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono flex items-center gap-1" title="系統程式與定位引擎最新更新時間">
+            <span>🕒 系統更新:</span>
+            <span id="sys-update-time-text">2026-11-07 09:23</span>
+          </span>
         </h1>
         <p class="text-xs text-slate-400">成交量與變化率 • 交易單價與漲跌幅 • 路段建案深度透視 • 房市熱度評估</p>
       </div>
@@ -786,6 +790,6 @@
   </div>
 
   <!-- App JavaScript -->
-  <script src="/static/app.js?v=3.5"></script>
+  <script src="/static/app.js?v=20261107_0923"></script>
 </body>
 </html>
