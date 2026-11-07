@@ -457,6 +457,17 @@ function initMap() {
 
   // Layer group for road and project markers
   STATE.markersLayer = L.layerGroup().addTo(STATE.map);
+
+  // Dynamically load all unmerged spots in the zoomed-in viewport even when dropdown is Nationwide
+  let moveTimer = null;
+  STATE.map.on('moveend', () => {
+    if (STATE.activeLevel !== 'road' || STATE.selectedRegion) return;
+    if (STATE.map.getZoom() < 11) return;
+    if (moveTimer) clearTimeout(moveTimer);
+    moveTimer = setTimeout(() => {
+      renderLocationHotspots(null);
+    }, 180);
+  });
 }
 
 function setBasemap(type) {
@@ -1019,9 +1030,17 @@ async function renderLocationHotspots(geojsonData, period) {
     const ageParams = getAgeParams();
     const regionParam = STATE.selectedRegion ? `&region=${encodeURIComponent(STATE.selectedRegion)}` : '';
     const hotspotType = STATE.hotspotType || 'all';
-    // When region is selected, fetch all unmerged distinct addresses (no truncation!)
-    const limit = STATE.selectedRegion ? 4000 : 1500;
-    const url = `/api/locations/hotspots?type=${hotspotType}&limit=${limit}${getTimeParams()}${ageParams}${regionParam}`;
+
+    let bboxParam = '';
+    const isZoomedIn = STATE.map && STATE.map.getZoom() >= 11;
+    if (!STATE.selectedRegion && isZoomedIn) {
+      const b = STATE.map.getBounds();
+      bboxParam = `&min_lat=${b.getSouth().toFixed(4)}&max_lat=${b.getNorth().toFixed(4)}&min_lng=${b.getWest().toFixed(4)}&max_lng=${b.getEast().toFixed(4)}`;
+    }
+
+    // When region is selected or map is zoomed in, fetch all unmerged distinct addresses (no truncation!)
+    const limit = (STATE.selectedRegion || isZoomedIn) ? 4500 : 2500;
+    const url = `/api/locations/hotspots?type=${hotspotType}&limit=${limit}${getTimeParams()}${ageParams}${regionParam}${bboxParam}`;
 
     if (STATE.markersLayer) {
       STATE.markersLayer.clearLayers();
@@ -1755,11 +1774,13 @@ async function fetchAndRenderTransactions(period, region, road, project, door) {
   const ageFilter = document.getElementById('tx-filter-age') ? document.getElementById('tx-filter-age').value : 'all';
   const chkAllTime = document.getElementById('chk-tx-all-time');
   const isAllTime = chkAllTime && chkAllTime.checked;
+  const chkSpecial = document.getElementById('tx-filter-special');
+  const excludeSpecial = chkSpecial ? chkSpecial.checked : false;
   const tbody = document.getElementById('tx-table-body');
   tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-400">載入明細中...</td></tr>';
 
   const timeQuery = isAllTime ? '&period=all' : getTimeParams();
-  let url = `/api/transactions?limit=100&sort_by=${sort}${timeQuery}`;
+  let url = `/api/transactions?limit=100&sort_by=${sort}${timeQuery}${excludeSpecial ? '&exclude_special=true' : ''}`;
   if (region) url += `&region=${encodeURIComponent(region)}`;
   if (road) url += `&road=${encodeURIComponent(road)}`;
   if (project) url += `&project=${encodeURIComponent(project)}`;

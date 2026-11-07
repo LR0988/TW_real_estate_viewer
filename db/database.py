@@ -70,7 +70,7 @@ def init_db(db_path: Path = DB_PATH):
     CREATE INDEX IF NOT EXISTS idx_tx_district_quarter ON transactions(full_district, trade_quarter);
     CREATE INDEX IF NOT EXISTS idx_tx_road ON transactions(road);
     CREATE INDEX IF NOT EXISTS idx_tx_project ON transactions(project_name);
-    CREATE INDEX IF NOT EXISTS idx_tx_serial ON transactions(serial_number);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_serial ON transactions(serial_number);
     CREATE INDEX IF NOT EXISTS idx_tx_special ON transactions(is_special_trade);
     CREATE INDEX IF NOT EXISTS idx_tx_season ON transactions(season_code);
     CREATE INDEX IF NOT EXISTS idx_tx_build_year ON transactions(build_year);
@@ -257,7 +257,7 @@ def insert_transactions_batch(df: pd.DataFrame, season_code: str, db_path: Path 
 
     placeholders = ", ".join([f":{c}" for c in cols])
     sql = f"""
-    INSERT INTO transactions ({", ".join(cols)})
+    INSERT OR IGNORE INTO transactions ({", ".join(cols)})
     VALUES ({placeholders})
     """
 

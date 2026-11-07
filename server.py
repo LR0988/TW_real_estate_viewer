@@ -1043,6 +1043,7 @@ def get_transactions(
     max_age: Optional[float] = Query(None),
     min_build_year: Optional[int] = Query(None),
     max_build_year: Optional[int] = Query(None),
+    exclude_special: bool = Query(False),
     sort_by: str = Query("date_desc"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0)
@@ -1053,6 +1054,9 @@ def get_transactions(
 
     where_clauses = ["trade_year >= 2012"]
     params = []
+
+    if exclude_special:
+        where_clauses.append("(is_special_trade = 0 OR is_special_trade IS NULL)")
 
     if start_period and end_period:
         where_clauses.append("trade_quarter >= ? AND trade_quarter <= ?")
@@ -1292,7 +1296,7 @@ def get_town_centroids() -> Dict[str, List[float]]:
 
 
 _NUM_MAP = str.maketrans('０１２３４５６７８９巿', '0123456789市')
-_DOOR_REGEX = re.compile(r'((?:(?:\d+)巷)?(?:(?:\d+)弄)?(?:\d+(?:[~～\-]\d+)?號))')
+_DOOR_REGEX = re.compile(r'((?:(?:\d+(?:之\d+)?)巷)?(?:(?:\d+(?:之\d+)?)弄)?(?:\d+(?:[~～\-]\d+)?(?:之\d+)?號))')
 
 
 def extract_spot_name(addr: str, road: str, proj: str) -> str:
@@ -1329,6 +1333,10 @@ def get_location_hotspots(
     type: str = Query("all", pattern="^(all|road|project)$"),
     min_age: Optional[float] = Query(None),
     max_age: Optional[float] = Query(None),
+    min_lat: Optional[float] = Query(None),
+    max_lat: Optional[float] = Query(None),
+    min_lng: Optional[float] = Query(None),
+    max_lng: Optional[float] = Query(None),
     limit: Optional[int] = Query(None, ge=1, le=5000)
 ):
     """
@@ -1343,6 +1351,19 @@ def get_location_hotspots(
     if region:
         clean_reg = region.replace("臺", "台")
         is_county = any(clean_reg.endswith(x) for x in ["市", "縣"]) and not any(x in clean_reg for x in ["區", "鄉", "鎮", "市區"])
+
+    # Determine if viewport bounding box narrows down visible districts when region is not selected
+    viewport_districts = []
+    if not region and min_lat is not None and max_lat is not None and min_lng is not None and max_lng is not None:
+        # Only apply viewport full-detail expansion when zoomed into a regional/city area (lat span < 1.2 deg)
+        if (max_lat - min_lat) < 1.25 and (max_lng - min_lng) < 1.25:
+            centroids = get_town_centroids()
+            pad = 0.08
+            for dist_name, c_xy in centroids.items():
+                if c_xy and len(c_xy) >= 2:
+                    c_lng, c_lat = c_xy[0], c_xy[1]
+                    if (min_lat - pad) <= c_lat <= (max_lat + pad) and (min_lng - pad) <= c_lng <= (max_lng + pad):
+                        viewport_districts.append(dist_name)
 
     use_preagg = (min_age is None and max_age is None)
 
@@ -1365,6 +1386,10 @@ def get_location_hotspots(
             else:
                 where_agg.append("full_district = ?")
                 params_agg.append(region)
+        elif viewport_districts:
+            placeholders = ",".join("?" for _ in viewport_districts)
+            where_agg.append(f"full_district IN ({placeholders})")
+            params_agg.extend(viewport_districts)
 
         if type == "road":
             where_agg.append("spot_type != 'project'")
@@ -1401,8 +1426,8 @@ def get_location_hotspots(
                 GROUP BY full_district, spot_name
             """
 
-        if not region:
-            fetch_limit = limit if limit is not None else 1500
+        if not region and not viewport_districts:
+            fetch_limit = limit if limit is not None else 2500
             query = f"""
                 WITH AggSpots AS ({base_cte}),
                 RankedSpots AS (
@@ -1413,30 +1438,14 @@ def get_location_hotspots(
                        full_district, county_name, district,
                        tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
                 FROM RankedSpots
-                WHERE rn <= 8
-                ORDER BY tx_count DESC
-                LIMIT ?
-            """
-            params = params_agg + [fetch_limit]
-        elif is_county:
-            fetch_limit = limit if limit is not None else 2000
-            query = f"""
-                WITH AggSpots AS ({base_cte}),
-                RankedSpots AS (
-                    SELECT *, ROW_NUMBER() OVER(PARTITION BY full_district ORDER BY tx_count DESC) as rn
-                    FROM AggSpots
-                )
-                SELECT spot as name, spot_type as type, road, door_addr, project_name,
-                       full_district, county_name, district,
-                       tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type
-                FROM RankedSpots
-                WHERE rn <= 30
+                WHERE rn <= 15
                 ORDER BY tx_count DESC
                 LIMIT ?
             """
             params = params_agg + [fetch_limit]
         else:
-            fetch_limit = limit if limit is not None else 4000
+            # Region selected (County or District) OR zoomed-in viewport: return ALL unmerged spots without truncation!
+            fetch_limit = limit if limit is not None else 4500
             query = f"""
                 WITH AggSpots AS ({base_cte})
                 SELECT spot as name, spot_type as type, road, door_addr, project_name,

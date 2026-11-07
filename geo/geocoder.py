@@ -42,8 +42,10 @@ def _get_http_session() -> requests.Session:
     return sess
 
 _FULLWIDTH_MAP = str.maketrans("０１２３４５６７８９巿", "0123456789市")
-_DOOR_EXTRACT_RE = re.compile(r"((?:(?:\d+)巷)?(?:(?:\d+)弄)?(?:\d+(?:[~～\-]\d+)?號))")
-_DOOR_NUM_RE = re.compile(r"(\d+)(?:[~～\-](\d+))?號")
+_DOOR_EXTRACT_RE = re.compile(
+    r"((?:(?:\d+(?:之\d+)?)巷)?(?:(?:\d+(?:之\d+)?)弄)?(?:\d+(?:[~～\-]\d+)?(?:之\d+)?號))"
+)
+_DOOR_NUM_RE = re.compile(r"(\d+)(?:[~～\-](\d+))?(?:之\d+)?號")
 
 
 def init_geocoder_db(db_path: Path = DB_PATH):
@@ -92,10 +94,10 @@ def clean_term(s: str, keep_door_parens: bool = True) -> str:
     return s.strip(" -")
 
 
-def extract_clean_door(s: str) -> str:
+def extract_clean_door(s: str, for_geocode: bool = False) -> str:
     """
-    Extracts lane/alley/door string (e.g. '182巷5號') and resolves ranges like '211~240號' -> '211號'
-    so ArcGIS PointAddress geocoding matches exact house numbers.
+    Extracts lane/alley/door string (e.g. '40巷25之1號', '233之8號') and resolves ranges like '211~240號' -> '211號'.
+    When for_geocode=True, simplifies '25之1號' -> '25號' so ArcGIS PointAddress matches the base building number.
     """
     if not s:
         return ""
@@ -105,7 +107,10 @@ def extract_clean_door(s: str) -> str:
         return ""
     door_str = m.group(1)
     # Convert range '211~240號' to concrete number '211號'
-    door_str = re.sub(r"(\d+)[~～\-]\d+號", r"\1號", door_str)
+    door_str = re.sub(r"(\d+)[~～\-]\d+((?:之\d+)?號)", r"\1\2", door_str)
+    if for_geocode:
+        door_str = re.sub(r"(\d+)之\d+號", r"\1號", door_str)
+        door_str = re.sub(r"(\d+)之\d+巷", r"\1巷", door_str)
     return door_str
 
 
@@ -114,8 +119,8 @@ def extract_primary_door_int(s: str) -> Optional[int]:
     if not s:
         return None
     s = str(s).translate(_FULLWIDTH_MAP)
-    # If there is a lane number (e.g. 182巷5號), the position along the main road is 182!
-    m_lane = re.search(r"(\d+)巷", s)
+    # If there is a lane number (e.g. 40巷25之1號), the position along the main road is 40!
+    m_lane = re.search(r"(\d+)(?:之\d+)?巷", s)
     if m_lane:
         return int(m_lane.group(1))
     m_door = _DOOR_NUM_RE.search(s)
@@ -153,7 +158,7 @@ def geocode_arcgis(
     clean_nm = clean_term(name, keep_door_parens=True)
     clean_nm_noparen = clean_term(name, keep_door_parens=False)
     clean_rd = clean_term(road, keep_door_parens=False)
-    door_part = extract_clean_door(door_addr) or extract_clean_door(clean_nm)
+    door_part = extract_clean_door(door_addr, for_geocode=True) or extract_clean_door(clean_nm, for_geocode=True)
 
     queries = []
     # 1. Exact door/lane address on the road (highest precision: PointAddress / StreetAddress)
