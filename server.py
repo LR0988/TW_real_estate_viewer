@@ -2486,20 +2486,33 @@ def get_community_trend(
             if vals:
                 q_item["net_unit_price"] = round(sum(vals) / len(vals), 2)
 
-    # Detect Repeat Sales (同戶歷次轉手獲利)
+    # Detect Repeat Sales (同戶歷次轉手獲利) & compute per-unit / per-door history counts
     repeat_sales = []
     unit_groups = {}
+    exact_unit_counts = {}
+    door_counts = {}
     for tr in tx_rows:
         d_str = tr.get("door_str") or ""
+        r_door_key = tr.get("road_door") or d_str
         fl = (tr.get("floor") or "").strip()
-        if not d_str or not fl or fl in ("全", "全棟", "見其他登記事項"):
-            continue
-        # Preserve sub-unit suffix (e.g. 10樓之2) from normalized address if present
         m_sub = re.search(r'(\d+樓之\d+)', tr.get("address") or "")
         fl_key = m_sub.group(1) if m_sub else fl
+        tr["floor_display"] = fl_key
+        if r_door_key:
+            door_counts[r_door_key] = door_counts.get(r_door_key, 0) + 1
+            if fl_key:
+                exact_unit_counts[(r_door_key, fl_key)] = exact_unit_counts.get((r_door_key, fl_key), 0) + 1
+        if not d_str or not fl or fl in ("全", "全棟", "見其他登記事項"):
+            continue
         b_bucket = round((tr.get("building_area_ping") or 0) / 3.0)
-        u_key = (tr.get("road_door") or d_str, fl_key, b_bucket)
+        u_key = (r_door_key, fl_key, b_bucket)
         unit_groups.setdefault(u_key, []).append(tr)
+
+    for tr in tx_rows:
+        r_door_key = tr.get("road_door") or tr.get("door_str") or ""
+        fl_key = tr.get("floor_display") or ""
+        tr["same_unit_count"] = exact_unit_counts.get((r_door_key, fl_key), 1)
+        tr["same_door_count"] = door_counts.get(r_door_key, 1)
 
     for (r_door, fl, _), u_txs in unit_groups.items():
         if len(u_txs) < 2:
@@ -2597,7 +2610,102 @@ def get_community_trend(
         },
         "quarters": quarters,
         "repeat_sales": repeat_sales[:50],
-        "transactions": list(reversed(tx_rows))[:80],
+        "transactions": list(reversed(tx_rows))[:500],
+    }
+
+
+@app.get("/api/unit/history")
+def get_unit_history(
+    region: str = Query(...),
+    road: Optional[str] = Query(""),
+    address: Optional[str] = Query(""),
+    floor: Optional[str] = Query(""),
+):
+    """
+    Returns complete historical transactions for a specific door/unit:
+    - same_unit_records: records matching the exact same (door + floor)
+    - same_door_records: all historical records at the same door number across all floors
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    f_dist = region.strip()
+    rd = normalize_address_numerals((road or "").strip())
+    norm_addr = normalize_address_numerals((address or "").strip())
+    norm_fl = normalize_floor_str((floor or "").strip())
+    m_sub = re.search(r'(\d+樓之\d+)', norm_addr)
+    target_fl_key = m_sub.group(1) if m_sub else norm_fl
+
+    d_str = extract_door_str(norm_addr)
+    if not d_str and norm_addr.endswith("號"):
+        d_str = norm_addr
+
+    if not d_str:
+        conn.close()
+        return {
+            "door_label": norm_addr or rd,
+            "unit_label": f"{norm_addr} {target_fl_key}".strip(),
+            "same_unit_records": [],
+            "same_door_records": [],
+        }
+
+    d_full = d_str.translate(_HALF_TO_FULL)
+    where_parts = ["target_type != '土地'", "unit_price_wan_ping > 0"]
+    params: List[Any] = []
+    if f_dist:
+        where_parts.append("(full_district = ? OR county_name = ?)")
+        params.extend([f_dist, f_dist])
+    if rd:
+        where_parts.append("road = ?")
+        params.append(rd)
+        where_parts.append("(address LIKE ? OR address LIKE ?)")
+        params.extend([f"%{rd}{d_str}%", f"%{rd}{d_full}%"])
+    else:
+        where_parts.append("(address LIKE ? OR address LIKE ?)")
+        params.extend([f"%{d_str}%", f"%{d_full}%"])
+
+    sql = f"""
+        SELECT id, trade_date, trade_quarter, county_name, district, full_district,
+               road, project_name, address, target_type, building_type, floor, total_floors,
+               building_area_ping, land_area_ping, total_price_wan, unit_price_wan_ping,
+               room_count, hall_count, bath_count, berth_category, berth_area_ping, berth_price, notes,
+               is_special_trade, build_year, building_age
+        FROM transactions
+        WHERE {" AND ".join(where_parts)}
+        ORDER BY trade_date DESC
+    """
+    rows = [dict(r) for r in cur.execute(sql, params).fetchall()]
+    rows = enrich_and_normalize_tx_rows(cur, rows)
+    conn.close()
+
+    r_door_label = (rd + d_str) if rd else d_str
+    same_door = []
+    same_unit = []
+    for r in rows:
+        row_d = extract_door_str(r.get("address") or "")
+        if row_d and row_d != d_str:
+            continue
+        m_s = re.search(r'(\d+樓之\d+)', r.get("address") or "")
+        r_fl = m_s.group(1) if m_s else (r.get("floor") or "")
+        r["floor_display"] = r_fl
+        b_ping = r.get("building_area_ping") or 0.0
+        p_ping = r.get("berth_area_ping") or 0.0
+        tot_wan = r.get("total_price_wan") or 0.0
+        p_wan = round((r.get("berth_price") or 0) / 10000.0, 2)
+        if p_wan > 0 and p_ping > 0 and (b_ping - p_ping) > 3.0 and (tot_wan - p_wan) > 0:
+            r["net_unit_price"] = round((tot_wan - p_wan) / (b_ping - p_ping), 2)
+        else:
+            r["net_unit_price"] = r.get("unit_price_wan_ping") or 0.0
+        r["berth_price_wan"] = p_wan
+        same_door.append(r)
+        if target_fl_key and (r_fl == target_fl_key or r.get("floor") == norm_fl):
+            same_unit.append(r)
+
+    return {
+        "door_label": r_door_label,
+        "unit_label": f"{r_door_label} · {target_fl_key}" if target_fl_key else r_door_label,
+        "same_unit_records": same_unit,
+        "same_door_records": same_door,
     }
 
 

@@ -605,6 +605,10 @@
 
       <!-- Table Body Container -->
       <div class="flex-1 overflow-y-auto p-6" id="tx-table-container">
+        <div class="mb-2.5 px-3 py-1.5 rounded-lg bg-blue-950/40 border border-blue-800/40 text-[11px] text-blue-300 flex items-center justify-between">
+          <span>💡 提示：直接<b>點擊下方任一筆交易細項</b>，即可在底下展開該戶（同門牌+同樓層）與同棟門牌之<b>歷年買賣紀錄與漲跌價差</b></span>
+          <span class="text-slate-400">含移轉建坪 · 土地地坪 · 車位 · 單價 · 總價</span>
+        </div>
         <table class="w-full text-left text-xs border-collapse">
           <thead>
             <tr class="border-b border-slate-800 text-slate-400 uppercase tracking-wider text-[11px] pb-2">
@@ -614,7 +618,7 @@
               <th class="py-2.5 font-medium">建坪 / 地坪</th>
               <th class="py-2.5 font-medium">格局 / 車位</th>
               <th class="py-2.5 font-medium text-right">每坪單價</th>
-              <th class="py-2.5 font-medium text-right">成交總價</th>
+              <th class="py-2.5 font-medium text-right">成交總價 / 歷年紀錄</th>
             </tr>
           </thead>
           <tbody id="tx-table-body" class="divide-y divide-slate-800/60">
@@ -682,9 +686,10 @@
 
         <!-- Price & Volume Trend Chart -->
         <div class="bg-slate-950/90 border border-slate-800 rounded-2xl p-4">
-          <div class="flex items-center justify-between mb-3">
-            <h4 class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h4 class="text-xs font-bold text-slate-200 flex items-center gap-2">
               <span>📈 歷季成交單價走勢 (萬/坪) 與成交量</span>
+              <span class="text-[11px] font-normal text-blue-400 bg-blue-950/60 border border-blue-800/50 px-2 py-0.5 rounded-full">👆 點擊圖表柱狀/節點可篩選該季成交細項</span>
             </h4>
             <div class="flex items-center gap-3 text-[11px] text-slate-400">
               <span class="inline-flex items-center gap-1"><span class="w-2.5 h-0.5 bg-emerald-400 inline-block"></span>平均單價</span>
@@ -692,15 +697,48 @@
               <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2 bg-blue-500/40 inline-block rounded-sm"></span>成交筆數</span>
             </div>
           </div>
-          <div class="h-64 w-full relative">
+          <div class="h-60 w-full relative cursor-pointer">
             <canvas id="ct-trend-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Detailed Transactions List (點擊細項可展開該戶歷年紀錄) -->
+        <div id="ct-tx-section" class="bg-slate-950/90 border border-slate-800 rounded-2xl p-4">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <div class="flex items-center gap-2 flex-wrap">
+              <h4 class="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                <span>📋 建案歷年成交細項明細 (含土地地坪 · 移轉建坪 · 車位 · 成交價格)</span>
+              </h4>
+              <span id="ct-tx-filter-badge" class="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">全部歷史</span>
+              <button id="btn-ct-clear-filter" class="hidden text-[11px] px-2 py-0.5 rounded-full bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 border border-blue-500/40 transition">
+                ✕ 清除篩選 (顯示全部)
+              </button>
+            </div>
+            <span class="text-[11px] text-amber-300/90">💡 點擊任一筆細項可展開「同戶 / 同門牌歷年紀錄」</span>
+          </div>
+          <div class="overflow-x-auto max-h-96 overflow-y-auto">
+            <table class="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr class="border-b border-slate-800 text-slate-400 text-[11px]">
+                  <th class="py-2 font-medium">交易日期 / 季度</th>
+                  <th class="py-2 font-medium">門牌地址 / 樓層 / 屋齡</th>
+                  <th class="py-2 font-medium">移轉建坪 / 土地地坪</th>
+                  <th class="py-2 font-medium">格局 / 車位資訊</th>
+                  <th class="py-2 font-medium text-right">每坪單價 (扣車位)</th>
+                  <th class="py-2 font-medium text-right">成交總價</th>
+                  <th class="py-2 font-medium text-right">歷年紀錄追蹤</th>
+                </tr>
+              </thead>
+              <tbody id="ct-tx-tbody" class="divide-y divide-slate-800/60">
+              </tbody>
+            </table>
           </div>
         </div>
 
         <!-- Repeat Sales (同戶歷次轉手獲利紀錄) -->
         <div id="ct-repeat-section" class="bg-slate-950/90 border border-slate-800 rounded-2xl p-4">
           <h4 class="text-xs font-bold text-amber-400 mb-3 flex items-center gap-1.5">
-            <span>🔄 同戶歷次轉手獲利追蹤 (同門牌 + 同樓層歷年買賣價差)</span>
+            <span>🔄 同戶歷次轉手獲利彙整 (同門牌 + 同樓層二次以上買賣價差)</span>
           </h4>
           <div class="overflow-x-auto max-h-56 overflow-y-auto">
             <table class="w-full text-left text-xs border-collapse">
@@ -888,6 +926,6 @@
   </div>
 
   <!-- App JavaScript -->
-  <script src="/static/app.js?v=20261107_1258"></script>
+  <script src="/static/app.js?v=20261107_1354"></script>
 </body>
 </html>

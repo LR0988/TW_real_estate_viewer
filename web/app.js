@@ -1954,13 +1954,14 @@ async function fetchAndRenderTransactions(period, region, road, project, door) {
 
     items.forEach(it => {
       const tr = document.createElement('tr');
-      tr.className = 'hover:bg-slate-800/40 transition text-slate-200';
+      tr.className = 'hover:bg-slate-800/60 transition text-slate-200 cursor-pointer group';
+      tr.title = '點擊展開此戶與同門牌歷年成交紀錄';
 
       const safeProj = (it.project_name || '').replace(/'/g, "\\'");
       const safeDist = (it.full_district || '').replace(/'/g, "\\'");
       const safeRoad = (it.road || '').replace(/'/g, "\\'");
       const projTag = it.project_name
-        ? `<button onclick="openCommunityTrendModal('${safeDist}', '${safeProj}', '${safeProj}', '${safeRoad}', '')" title="點擊查看【${it.project_name}】建案價格走勢與轉手獲利" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 font-semibold border border-amber-500/30 ml-1 cursor-pointer transition">🏢 建案: ${it.project_name} 📈</button>`
+        ? `<button onclick="event.stopPropagation(); openCommunityTrendModal('${safeDist}', '${safeProj}', '${safeProj}', '${safeRoad}', '')" title="點擊查看【${it.project_name}】建案價格走勢與轉手獲利" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 font-semibold border border-amber-500/30 ml-1 cursor-pointer transition">🏢 建案: ${it.project_name} 📈</button>`
         : '';
 
       const specialTag = it.is_special_trade === 1
@@ -1998,23 +1999,59 @@ async function fetchAndRenderTransactions(period, region, road, project, door) {
             ${projTag}
             ${specialTag}
           </div>
-          <div class="text-[10px] text-slate-400 truncate max-w-xs">${it.address || ''}</div>
+          <div class="text-[11px] text-slate-300 font-mono truncate max-w-xs">${it.address || ''}</div>
         </td>
         <td class="py-2.5">
           <div class="flex items-center flex-wrap">${it.building_type || '住宅'} ${ageTag}</div>
-          <div class="text-[10px] text-slate-400">${it.floor || ''} / ${it.total_floors || ''}</div>
+          <div class="text-[11px] text-slate-300 font-medium mt-0.5">${it.floor || '--'} / 共${it.total_floors || '--'}</div>
         </td>
         <td class="py-2.5">
           <div class="font-semibold text-slate-200">建坪: ${it.building_area_ping || 0} 坪</div>
-          <div class="text-[11px] text-slate-400 mt-0.5">地坪: ${it.land_area_ping || 0} 坪</div>
+          <div class="text-[11px] text-amber-300/90 mt-0.5">土地: ${it.land_area_ping || 0} 坪</div>
         </td>
         <td class="py-2.5 text-slate-300">
           <div>${it.room_count}房 ${it.hall_count}廳 ${it.bath_count}衛</div>
           ${parkBadge}
         </td>
         <td class="py-2.5 text-right font-bold ${priceColor}">${it.unit_price_wan_ping} 萬/坪</td>
-        <td class="py-2.5 text-right font-bold text-slate-100">${it.total_price_wan.toLocaleString()} 萬元</td>
+        <td class="py-2.5 text-right">
+          <div class="font-bold text-slate-100">${it.total_price_wan.toLocaleString()} 萬元</div>
+          <div class="mt-0.5">
+            <span class="tx-hist-toggle-badge inline-block px-2 py-0.5 rounded-full text-[10px] bg-blue-500/15 group-hover:bg-blue-500/30 text-blue-300 border border-blue-500/30 transition">
+              🔎 歷年紀錄 ▾
+            </span>
+          </div>
+        </td>
       `;
+
+      tr.addEventListener('click', async () => {
+        const nextRow = tr.nextElementSibling;
+        if (nextRow && nextRow.classList.contains('unit-history-expand-row')) {
+          nextRow.remove();
+          tr.classList.remove('bg-slate-800/70');
+          return;
+        }
+        tr.classList.add('bg-slate-800/70');
+        const expandTr = document.createElement('tr');
+        expandTr.className = 'unit-history-expand-row bg-slate-950/95 border-b border-slate-800';
+        expandTr.innerHTML = `<td colspan="7" class="p-3 text-center text-slate-400 text-xs">正在查詢「${it.address || ''}」歷年買賣紀錄...</td>`;
+        tr.insertAdjacentElement('afterend', expandTr);
+
+        try {
+          const qParams = new URLSearchParams({
+            region: it.full_district || '',
+            road: it.road || '',
+            address: it.address || '',
+            floor: it.floor || ''
+          });
+          const hRes = await apiFetch(`/api/unit/history?${qParams.toString()}`);
+          const hData = await hRes.json();
+          expandTr.innerHTML = `<td colspan="7" class="p-3">${buildUnitHistoryExpansionHtml(it, hData.same_unit_records || [], hData.same_door_records || [], hData.unit_label, hData.door_label)}</td>`;
+        } catch (e) {
+          expandTr.innerHTML = `<td colspan="7" class="p-3 text-center text-red-400 text-xs">查詢歷年紀錄失敗</td>`;
+        }
+      });
+
       tbody.appendChild(tr);
     });
   } catch (err) {
@@ -2733,6 +2770,124 @@ async function promptTagCommunityName(region, spotName, currentComm, road = '', 
   }
 }
 
+function buildUnitHistoryExpansionHtml(clickedItem, sameUnitRecords, sameDoorRecords, unitLabel = '', doorLabel = '') {
+  const flDisp = clickedItem.floor_display || clickedItem.floor || '';
+  const uTitle = unitLabel || `${clickedItem.road_door || clickedItem.address || ''} · ${flDisp}`;
+  const dTitle = doorLabel || clickedItem.road_door || clickedItem.address || '';
+
+  // Sort chronological ascending to compute price diffs for same-unit records
+  const unitAsc = [...(sameUnitRecords || [])].sort((a, b) => (a.trade_date || '').localeCompare(b.trade_date || ''));
+
+  let unitHtml = '';
+  if (unitAsc.length >= 2) {
+    const rowsHtml = unitAsc.map((u, idx) => {
+      const prev = idx > 0 ? unitAsc[idx - 1] : null;
+      let diffHtml = '<span class="text-slate-500">首次登錄入手</span>';
+      if (prev && prev.total_price_wan > 0 && u.total_price_wan > 0) {
+        const diffWan = Math.round((u.total_price_wan - prev.total_price_wan) * 10) / 10;
+        const diffPct = Math.round((diffWan / prev.total_price_wan) * 1000) / 10;
+        const sign = diffWan > 0 ? '+' : '';
+        const clr = diffWan > 0 ? 'text-red-400' : (diffWan < 0 ? 'text-emerald-400' : 'text-slate-300');
+        diffHtml = `<span class="font-bold ${clr}">${sign}${diffWan.toLocaleString()} 萬 (${sign}${diffPct}%)</span>`;
+      }
+      const isCurrent = u.id === clickedItem.id || (u.trade_date === clickedItem.trade_date && u.total_price_wan === clickedItem.total_price_wan);
+      const hasPark = (u.target_type && u.target_type.includes('車位')) || (u.berth_category && u.berth_category !== 'nan') || (u.berth_area_ping > 0);
+      const parkStr = hasPark ? `🚗 含車位${u.berth_area_ping > 0 ? ` (${u.berth_area_ping}坪)` : ''}` : '無車位';
+      return `
+        <tr class="${isCurrent ? 'bg-amber-500/10' : ''} border-b border-slate-800/60">
+          <td class="py-1.5 px-2 font-mono text-slate-300">
+            第 ${idx + 1} 次 · ${u.trade_date} (${u.trade_quarter || ''})
+            ${isCurrent ? '<span class="ml-1 px-1.5 py-0.2 rounded bg-amber-500/30 text-amber-200 text-[10px]">本筆</span>' : ''}
+          </td>
+          <td class="py-1.5 px-2 text-slate-200">建坪 <b>${u.building_area_ping || 0}</b> 坪 ｜ 土地 <b>${u.land_area_ping || 0}</b> 坪</td>
+          <td class="py-1.5 px-2 text-slate-300">${parkStr}</td>
+          <td class="py-1.5 px-2 text-right font-semibold text-emerald-400">${u.unit_price_wan_ping} 萬/坪</td>
+          <td class="py-1.5 px-2 text-right font-bold text-white">${(u.total_price_wan || 0).toLocaleString()} 萬</td>
+          <td class="py-1.5 px-2 text-right">${diffHtml}</td>
+        </tr>
+      `;
+    }).join('');
+
+    unitHtml = `
+      <div class="mb-3">
+        <div class="text-xs font-bold text-amber-300 mb-1.5 flex items-center gap-1.5">
+          <span>🔥 同戶歷年買賣紀錄（${uTitle}）— 共 ${unitAsc.length} 筆歷年交易</span>
+        </div>
+        <table class="w-full text-left text-[11px] border-collapse bg-slate-900/90 rounded-lg overflow-hidden border border-amber-500/30">
+          <thead>
+            <tr class="bg-slate-950 text-slate-400 border-b border-slate-800">
+              <th class="py-1.5 px-2">歷次買賣日期</th>
+              <th class="py-1.5 px-2">移轉建坪 / 土地地坪</th>
+              <th class="py-1.5 px-2">車位資訊</th>
+              <th class="py-1.5 px-2 text-right">每坪單價</th>
+              <th class="py-1.5 px-2 text-right">成交總價</th>
+              <th class="py-1.5 px-2 text-right">與前次價差 / 漲跌幅</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+    `;
+  } else {
+    unitHtml = `
+      <div class="mb-2.5 px-3 py-2 rounded-lg bg-slate-900/90 border border-slate-800 text-xs text-slate-300 flex items-center justify-between flex-wrap gap-2">
+        <span>📌 <b>同戶歷年紀錄（${uTitle}）</b>：自 2012 年實價登錄以來僅有此 <b>1 筆</b>成交紀錄（${clickedItem.trade_date} · 成交總價 <b>${(clickedItem.total_price_wan || 0).toLocaleString()} 萬</b> · 建坪 <b>${clickedItem.building_area_ping || 0} 坪</b> · 土地 <b>${clickedItem.land_area_ping || 0} 坪</b>），目前尚無其他歷年轉手紀錄。</span>
+      </div>
+    `;
+  }
+
+  // Same-door records across all floors
+  const doorDesc = [...(sameDoorRecords || [])].sort((a, b) => (b.trade_date || '').localeCompare(a.trade_date || ''));
+  let doorHtml = '';
+  if (doorDesc.length > 1) {
+    const dRows = doorDesc.slice(0, 15).map(d => {
+      const isCurrent = d.id === clickedItem.id || (d.trade_date === clickedItem.trade_date && d.total_price_wan === clickedItem.total_price_wan && d.floor === clickedItem.floor);
+      const hasPark = (d.target_type && d.target_type.includes('車位')) || (d.berth_category && d.berth_category !== 'nan') || (d.berth_area_ping > 0);
+      const parkStr = hasPark ? `🚗 含車位${d.berth_area_ping > 0 ? ` (${d.berth_area_ping}坪)` : ''}` : '無車位';
+      return `
+        <tr class="${isCurrent ? 'bg-blue-500/15' : ''} border-b border-slate-800/50">
+          <td class="py-1 px-2 font-mono text-slate-300">
+            ${d.trade_date} (${d.trade_quarter || ''})
+            ${isCurrent ? '<span class="ml-1 px-1.5 py-0.2 rounded bg-blue-500/30 text-blue-200 text-[10px]">本筆</span>' : ''}
+          </td>
+          <td class="py-1 px-2 font-semibold text-white">${d.floor_display || d.floor || '--'} / 共${d.total_floors || '--'}</td>
+          <td class="py-1 px-2 text-slate-300">建坪 <b>${d.building_area_ping || 0}</b> 坪 ｜ 土地 <b>${d.land_area_ping || 0}</b> 坪</td>
+          <td class="py-1 px-2 text-slate-400">${d.room_count || 0}房${d.hall_count || 0}廳${d.bath_count || 0}衛 · ${parkStr}</td>
+          <td class="py-1 px-2 text-right font-semibold text-emerald-400">${d.unit_price_wan_ping} 萬/坪</td>
+          <td class="py-1 px-2 text-right font-bold text-slate-100">${(d.total_price_wan || 0).toLocaleString()} 萬</td>
+        </tr>
+      `;
+    }).join('');
+    doorHtml = `
+      <div>
+        <div class="text-xs font-bold text-blue-300 mb-1.5 flex items-center gap-1.5">
+          <span>🏢 同門牌各樓層歷年成交對照（${dTitle}）— 共 ${doorDesc.length} 筆歷年成交</span>
+        </div>
+        <table class="w-full text-left text-[11px] border-collapse bg-slate-900/80 rounded-lg overflow-hidden border border-slate-800">
+          <thead>
+            <tr class="bg-slate-950 text-slate-400 border-b border-slate-800">
+              <th class="py-1 px-2">交易日期</th>
+              <th class="py-1 px-2">樓層</th>
+              <th class="py-1 px-2">移轉建坪 / 土地地坪</th>
+              <th class="py-1 px-2">格局與車位</th>
+              <th class="py-1 px-2 text-right">每坪單價</th>
+              <th class="py-1 px-2 text-right">成交總價</th>
+            </tr>
+          </thead>
+          <tbody>${dRows}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="rounded-xl bg-slate-900/70 border border-blue-500/30 p-3 space-y-2 shadow-inner">
+      ${unitHtml}
+      ${doorHtml}
+    </div>
+  `;
+}
+
 async function openCommunityTrendModal(region, projectName, spotName, road = '', doorAddr = '') {
   if (STATE.map) {
     STATE.map.closePopup();
@@ -2750,6 +2905,10 @@ async function openCommunityTrendModal(region, projectName, spotName, road = '',
   document.getElementById('ct-region-badge').innerText = region || '--';
   document.getElementById('ct-spec-badge').innerText = '正在分析歷史價格走勢與同戶轉手紀錄...';
   document.getElementById('ct-doors-list').innerText = '載入中...';
+  const ctTxTbody = document.getElementById('ct-tx-tbody');
+  if (ctTxTbody) {
+    ctTxTbody.innerHTML = '<tr><td colspan="7" class="py-6 text-center text-slate-500">載入建案歷年成交細項中...</td></tr>';
+  }
   document.getElementById('ct-repeat-tbody').innerHTML = '<tr><td colspan="6" class="py-4 text-center text-slate-500">分析中...</td></tr>';
 
   const renameBtn = document.getElementById('btn-ct-rename');
@@ -2786,10 +2945,172 @@ async function openCommunityTrendModal(region, projectName, spotName, road = '',
     if (data.summary && data.summary.avg_land_ping) specs.push(`均地坪 ${data.summary.avg_land_ping} 坪`);
     document.getElementById('ct-spec-badge').innerText = specs.join(' ｜ ');
 
+    const allTxs = data.transactions || [];
     const doors = data.doors || [];
-    document.getElementById('ct-doors-list').innerText = doors.length > 0
-      ? `${doors.join('、')}${data.door_count > doors.length ? ` ... (共 ${data.door_count} 個門牌)` : ` (共 ${doors.length} 個門牌)`}`
-      : (spotName || '--');
+    let activeQuarterFilter = null;
+    let activeDoorFilter = null;
+
+    // Render interactive door filter pills
+    function renderDoorsBar() {
+      const doorsContainer = document.getElementById('ct-doors-list');
+      if (!doorsContainer) return;
+      if (doors.length === 0) {
+        doorsContainer.innerText = spotName || '--';
+        return;
+      }
+      const allBtnClass = !activeDoorFilter
+        ? 'bg-blue-600 text-white border-blue-500'
+        : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700';
+      let pillsHtml = `<button data-door="" class="ct-door-pill px-2 py-0.5 rounded-md border text-[11px] transition ${allBtnClass}">全部門牌 (${allTxs.length}筆)</button>`;
+      doors.forEach(d => {
+        const cnt = allTxs.filter(t => t.road_door === d || (t.address && t.address.includes(d))).length;
+        const isAct = activeDoorFilter === d;
+        const cls = isAct
+          ? 'bg-blue-600 text-white border-blue-500 font-semibold'
+          : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700';
+        pillsHtml += `<button data-door="${d}" class="ct-door-pill px-2 py-0.5 rounded-md border text-[11px] transition ${cls}">${d}${cnt > 0 ? ` (${cnt}筆)` : ''}</button>`;
+      });
+      doorsContainer.innerHTML = `<div class="inline-flex items-center gap-1.5 flex-wrap">${pillsHtml}</div>`;
+      doorsContainer.querySelectorAll('.ct-door-pill').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const dVal = btn.getAttribute('data-door') || null;
+          activeDoorFilter = (activeDoorFilter === dVal) ? null : dVal;
+          renderDoorsBar();
+          renderCommunityTransactionsTable();
+        });
+      });
+    }
+
+    // Render Detailed Transactions Table with click-to-expand unit history
+    function renderCommunityTransactionsTable() {
+      if (!ctTxTbody) return;
+      const filterBadge = document.getElementById('ct-tx-filter-badge');
+      const clearBtn = document.getElementById('btn-ct-clear-filter');
+
+      let filtered = allTxs;
+      const filterParts = [];
+      if (activeQuarterFilter) {
+        filtered = filtered.filter(t => t.trade_quarter === activeQuarterFilter);
+        filterParts.push(`季度: ${activeQuarterFilter}`);
+      }
+      if (activeDoorFilter) {
+        filtered = filtered.filter(t => t.road_door === activeDoorFilter || (t.address && t.address.includes(activeDoorFilter)));
+        filterParts.push(`門牌: ${activeDoorFilter}`);
+      }
+
+      if (filterBadge) {
+        filterBadge.innerText = filterParts.length > 0
+          ? `${filterParts.join(' ｜ ')} (共 ${filtered.length} 筆)`
+          : `全部歷史 (共 ${filtered.length} 筆)`;
+      }
+      if (clearBtn) {
+        if (activeQuarterFilter || activeDoorFilter) {
+          clearBtn.classList.remove('hidden');
+        } else {
+          clearBtn.classList.add('hidden');
+        }
+      }
+
+      ctTxTbody.innerHTML = '';
+      if (filtered.length === 0) {
+        ctTxTbody.innerHTML = '<tr><td colspan="7" class="py-6 text-center text-slate-500">此篩選條件下無成交紀錄</td></tr>';
+        return;
+      }
+
+      filtered.forEach(it => {
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-slate-900/90 transition text-slate-200 cursor-pointer group';
+        tr.title = '點擊展開此戶與同門牌歷年買賣紀錄';
+
+        const hasPark = (it.target_type && it.target_type.includes('車位')) || (it.berth_category && it.berth_category !== 'nan') || (it.berth_area_ping > 0);
+        const bCat = (it.berth_category && it.berth_category !== 'nan') ? it.berth_category : '';
+        const parkBadge = hasPark
+          ? `<span class="inline-block px-1.5 py-0.5 rounded text-[10px] bg-sky-500/20 text-sky-300 border border-sky-500/30 font-medium">🚗 含車位${bCat ? ` (${bCat})` : ''}${it.berth_area_ping > 0 ? ` · ${it.berth_area_ping}坪` : ''}${it.berth_price_wan > 0 ? ` · ${it.berth_price_wan}萬` : ''}</span>`
+          : `<span class="inline-block px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700/60">無車位</span>`;
+
+        const flShow = it.floor_display || it.floor || '--';
+        const ageShow = (it.building_age !== null && it.building_age !== undefined) ? `屋齡 ${it.building_age}年` : '';
+        const netDiffers = it.net_unit_price && Math.abs(it.net_unit_price - it.unit_price_wan_ping) >= 0.2;
+
+        const uCnt = it.same_unit_count || 1;
+        const dCnt = it.same_door_count || 1;
+        let histBadge = '';
+        if (uCnt >= 2) {
+          histBadge = `<span class="inline-block px-2 py-0.5 rounded-full text-[10px] bg-amber-500/20 group-hover:bg-amber-500/35 text-amber-300 border border-amber-500/40 font-semibold transition">🔥 同戶轉手 ${uCnt} 筆 ▾</span>`;
+        } else if (dCnt >= 2) {
+          histBadge = `<span class="inline-block px-2 py-0.5 rounded-full text-[10px] bg-blue-500/20 group-hover:bg-blue-500/35 text-blue-300 border border-blue-500/30 font-medium transition">📂 同戶1筆 · 同門牌${dCnt}筆 ▾</span>`;
+        } else {
+          histBadge = `<span class="inline-block px-2 py-0.5 rounded-full text-[10px] bg-slate-800 group-hover:bg-slate-700 text-slate-300 border border-slate-700 transition">🔎 歷年紀錄 (1筆) ▾</span>`;
+        }
+
+        tr.innerHTML = `
+          <td class="py-2.5 font-mono text-slate-300">
+            <div>${it.trade_date || '--'}</div>
+            <div class="text-[10px] text-slate-500">${it.trade_quarter || ''}</div>
+          </td>
+          <td class="py-2.5">
+            <div class="font-semibold text-white font-mono">${it.address || it.road_door || '--'}</div>
+            <div class="text-[11px] text-slate-400 mt-0.5">${flShow} / 共${it.total_floors || '--'} ${ageShow ? `｜ ${ageShow}` : ''}</div>
+          </td>
+          <td class="py-2.5">
+            <div class="font-semibold text-slate-100">移轉建坪: <span class="text-emerald-300">${it.building_area_ping || 0} 坪</span></div>
+            <div class="text-[11px] text-amber-300/90 mt-0.5">土地地坪: <b>${it.land_area_ping || 0} 坪</b></div>
+          </td>
+          <td class="py-2.5">
+            <div class="text-slate-300">${it.room_count || 0}房 ${it.hall_count || 0}廳 ${it.bath_count || 0}衛</div>
+            <div class="mt-0.5">${parkBadge}</div>
+          </td>
+          <td class="py-2.5 text-right">
+            <div class="font-bold text-emerald-400">${it.unit_price_wan_ping} 萬/坪</div>
+            ${netDiffers ? `<div class="text-[10px] text-cyan-400 mt-0.5">扣車位: ${it.net_unit_price} 萬/坪</div>` : ''}
+          </td>
+          <td class="py-2.5 text-right font-bold text-white text-sm">
+            ${(it.total_price_wan || 0).toLocaleString()} 萬元
+          </td>
+          <td class="py-2.5 text-right">
+            ${histBadge}
+          </td>
+        `;
+
+        tr.addEventListener('click', () => {
+          const nextRow = tr.nextElementSibling;
+          if (nextRow && nextRow.classList.contains('ct-unit-history-row')) {
+            nextRow.remove();
+            tr.classList.remove('bg-slate-800/80');
+            return;
+          }
+          tr.classList.add('bg-slate-800/80');
+          const sameDoorList = allTxs.filter(t => t.road_door && t.road_door === it.road_door);
+          const sameUnitList = sameDoorList.filter(t => (t.floor_display || t.floor) === (it.floor_display || it.floor));
+          const expandTr = document.createElement('tr');
+          expandTr.className = 'ct-unit-history-row bg-slate-950/95 border-b border-slate-800';
+          expandTr.innerHTML = `<td colspan="7" class="p-3">${buildUnitHistoryExpansionHtml(
+            it,
+            sameUnitList.length > 0 ? sameUnitList : [it],
+            sameDoorList.length > 0 ? sameDoorList : [it],
+            `${it.road_door || ''} · ${flShow}`,
+            it.road_door || ''
+          )}</td>`;
+          tr.insertAdjacentElement('afterend', expandTr);
+        });
+
+        ctTxTbody.appendChild(tr);
+      });
+    }
+
+    const clearFilterBtn = document.getElementById('btn-ct-clear-filter');
+    if (clearFilterBtn) {
+      clearFilterBtn.onclick = () => {
+        activeQuarterFilter = null;
+        activeDoorFilter = null;
+        renderDoorsBar();
+        renderCommunityTransactionsTable();
+        updateChartBarHighlight();
+      };
+    }
+
+    renderDoorsBar();
+    renderCommunityTransactionsTable();
 
     const s = data.summary || {};
     document.getElementById('ct-kpi-latest-price').innerText = s.latest_avg_price ? `${s.latest_avg_price} 萬/坪` : '--';
@@ -2807,12 +3128,25 @@ async function openCommunityTrendModal(region, projectName, spotName, road = '',
     document.getElementById('ct-kpi-tx-count').innerText = `${(s.total_tx || 0).toLocaleString()} 筆`;
     document.getElementById('ct-kpi-repeat-count').innerText = `同戶歷次轉手: ${s.repeat_sales_count || 0} 筆`;
 
-    // Render Chart.js Trend Chart
+    // Render Chart.js Trend Chart with interactive bar/point click filtering
     const qList = data.quarters || [];
     const ctx = document.getElementById('ct-trend-chart').getContext('2d');
     if (communityTrendChartInstance) {
       communityTrendChartInstance.destroy();
     }
+
+    function updateChartBarHighlight() {
+      if (!communityTrendChartInstance) return;
+      const labels = communityTrendChartInstance.data.labels || [];
+      communityTrendChartInstance.data.datasets[2].backgroundColor = labels.map(p =>
+        p === activeQuarterFilter ? 'rgba(245, 158, 11, 0.85)' : 'rgba(59, 130, 246, 0.35)'
+      );
+      communityTrendChartInstance.data.datasets[2].borderColor = labels.map(p =>
+        p === activeQuarterFilter ? '#fbbf24' : 'rgba(59, 130, 246, 0.7)'
+      );
+      communityTrendChartInstance.update();
+    }
+
     communityTrendChartInstance = new Chart(ctx, {
       data: {
         labels: qList.map(q => q.period),
@@ -2824,7 +3158,7 @@ async function openCommunityTrendModal(region, projectName, spotName, road = '',
             borderColor: '#34d399',
             backgroundColor: 'rgba(52, 211, 153, 0.12)',
             borderWidth: 2.5,
-            pointRadius: 3,
+            pointRadius: 3.5,
             tension: 0.25,
             yAxisID: 'yPrice',
             fill: true,
@@ -2845,8 +3179,8 @@ async function openCommunityTrendModal(region, projectName, spotName, road = '',
             type: 'bar',
             label: '成交筆數',
             data: qList.map(q => q.tx_count),
-            backgroundColor: 'rgba(59, 130, 246, 0.35)',
-            borderColor: 'rgba(59, 130, 246, 0.7)',
+            backgroundColor: qList.map(() => 'rgba(59, 130, 246, 0.35)'),
+            borderColor: qList.map(() => 'rgba(59, 130, 246, 0.7)'),
             borderWidth: 1,
             borderRadius: 4,
             yAxisID: 'yVol',
@@ -2857,12 +3191,31 @@ async function openCommunityTrendModal(region, projectName, spotName, road = '',
         responsive: true,
         maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
+        onClick: (e, elements) => {
+          if (elements && elements.length > 0) {
+            const idx = elements[0].index;
+            const clickedPeriod = qList[idx]?.period;
+            if (clickedPeriod) {
+              activeQuarterFilter = (activeQuarterFilter === clickedPeriod) ? null : clickedPeriod;
+              updateChartBarHighlight();
+              renderCommunityTransactionsTable();
+              const txSec = document.getElementById('ct-tx-section');
+              if (txSec) txSec.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+          }
+        },
         plugins: {
           legend: { display: false },
           tooltip: {
             backgroundColor: 'rgba(15, 23, 42, 0.95)',
             borderColor: '#334155',
             borderWidth: 1,
+            callbacks: {
+              footer: (items) => {
+                const p = items[0]?.label;
+                return `👉 點擊篩選【${p}】成交細項 (含土地/建坪/總價)`;
+              }
+            }
           }
         },
         scales: {
@@ -2891,10 +3244,9 @@ async function openCommunityTrendModal(region, projectName, spotName, road = '',
     const repeats = data.repeat_sales || [];
     const rBody = document.getElementById('ct-repeat-tbody');
     if (repeats.length === 0) {
-      rBody.innerHTML = '<tr><td colspan="6" class="py-4 text-center text-slate-500">目前此建案尚無同門牌同樓層之二次轉手紀錄</td></tr>';
+      rBody.innerHTML = '<tr><td colspan="6" class="py-4 text-center text-slate-500">目前此建案尚無同門牌同樓層之二次轉手紀錄 (可點擊上方任一成交細項檢視同門牌各樓層歷年成交)</td></tr>';
     } else {
       rBody.innerHTML = repeats.map(r => {
-        const isGain = r.profit_wan >= 0;
         const sign = r.profit_wan > 0 ? '+' : '';
         const clr = r.profit_wan > 0 ? 'text-red-400' : (r.profit_wan < 0 ? 'text-emerald-400' : 'text-slate-300');
         return `
