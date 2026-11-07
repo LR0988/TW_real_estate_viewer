@@ -1091,6 +1091,33 @@ _SEC_NUM_TO_CH = {
 }
 
 
+def clean_search_query(q: str) -> str:
+    """
+    Cleans pasted UI text or extra metadata from user search queries, e.g.:
+    '新北市永和區環河東路一段164號7樓、7樓 / 共12樓 ｜ 屋齡 25.4'
+    -> '新北市永和區環河東路一段164號7樓'
+    """
+    s = (q or "").strip()
+    if not s:
+        return ""
+    # Strip pipe-delimited UI metadata (｜ 屋齡 25.4, | 建坪 ..., etc.)
+    s = re.split(r'[｜|]', s)[0].strip()
+    # Normalize Chinese / full-width numerals first
+    s = normalize_address_numerals(s)
+    for k_sec, v_sec in _SEC_NUM_TO_CH.items():
+        if k_sec in s:
+            s = s.replace(k_sec, v_sec)
+    # Strip total floor / age / area UI suffixes
+    s = re.sub(r'[/／]\s*共?\s*\d+\s*[樓層Ff]?', ' ', s)
+    s = re.sub(r'共\s*\d+\s*[樓層Ff]?', ' ', s)
+    s = re.sub(r'(?:屋齡|移轉建坪|建坪|土地地坪|土地|地坪|總價|單價)\s*[:：]?\s*[\d\.]+\s*(?:年|坪|萬元|萬/坪|萬)?', ' ', s)
+    # Deduplicate repeated floor tokens like '164號7樓、7樓' -> '164號7樓'
+    s = re.sub(r'(\d+\s*[樓層Ff](?:之\d+)?)\s*[、,，/／\s]+\1\b', r'\1', s)
+    s = re.sub(r'[、/／]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
 def parse_smart_keyword(kw: str, cur: Optional[sqlite3.Cursor] = None) -> Tuple[str, List[Any]]:
     """
     Intelligently parses Taiwan real estate query strings like:
@@ -1098,11 +1125,7 @@ def parse_smart_keyword(kw: str, cur: Optional[sqlite3.Cursor] = None) -> Tuple[
     Normalizes Chinese/full-width numerals, decomposes into floors, doors, roads, districts,
     and building names, and produces fast indexed SQL clauses.
     """
-    kw_norm = normalize_address_numerals(kw.strip())
-    for k_sec, v_sec in _SEC_NUM_TO_CH.items():
-        if k_sec in kw_norm:
-            kw_norm = kw_norm.replace(k_sec, v_sec)
-
+    kw_norm = clean_search_query(kw)
     kw_work = kw_norm
     clauses = []
     params = []
@@ -1112,7 +1135,9 @@ def parse_smart_keyword(kw: str, cur: Optional[sqlite3.Cursor] = None) -> Tuple[
     m_ar = re.search(r'(\d+)\s*(?:[樓層Ff])(?:之(\d+))?', kw_work)
     if m_ar:
         fl_num = int(m_ar.group(1))
-        kw_work = kw_work[:m_ar.start()] + ' ' + kw_work[m_ar.end():]
+        # Remove all occurrences of this floor pattern from kw_work so repeated '、7樓' won't pollute tokens
+        kw_work = re.sub(r'\b' + str(fl_num) + r'\s*(?:[樓層Ff])(?:之\d+)?', ' ', kw_work)
+        kw_work = kw_work.replace(m_ar.group(0), ' ')
 
     if fl_num:
         fl_ch = int_to_chinese_numeral(fl_num)
@@ -1410,10 +1435,9 @@ def search_and_locate(q: str = Query(..., min_length=1)):
     conn = get_connection()
     cur = conn.cursor()
 
-    q_norm = normalize_address_numerals(q.strip())
-    for k_sec, v_sec in _SEC_NUM_TO_CH.items():
-        if k_sec in q_norm:
-            q_norm = q_norm.replace(k_sec, v_sec)
+    q_norm = clean_search_query(q)
+    if not q_norm:
+        q_norm = normalize_address_numerals(q.strip())
 
     has_specific_door_or_floor = bool(re.search(r'\d+\s*[號樓層Ff]', q_norm))
     cm_row = None
@@ -1435,6 +1459,7 @@ def search_and_locate(q: str = Query(..., min_length=1)):
 
     discovered_proj = ""
     spot_only_name = ""
+    latest_quarter = None
 
     if cm_row and cm_row[4] and cm_row[4] > 0:
         target_district = cm_row[0]
@@ -1449,6 +1474,7 @@ def search_and_locate(q: str = Query(..., min_length=1)):
         avg_total_price = cm_row[6] or 0.0
         min_date = cm_row[7]
         max_date = cm_row[8]
+        latest_quarter = max_date
         target_addr = f"{target_district}{spot_nm}"
         sample_rows = []
     else:
@@ -1470,6 +1496,27 @@ def search_and_locate(q: str = Query(..., min_length=1)):
         avg_total_price = row[2] if row else 0.0
         min_date = row[3] if row else None
         max_date = row[4] if row else None
+
+        # If a specific floor query had 0 transactions, fall back to door-level query so the building is still located
+        if total_tx == 0 and re.search(r'\d+\s*[樓層Ff]', q_norm):
+            q_door_only = re.sub(r'\d+\s*[樓層Ff](?:之\d+)?', ' ', q_norm).strip()
+            if q_door_only and q_door_only != q_norm:
+                kw_where, kw_params = parse_smart_keyword(q_door_only, cur=cur)
+                cur.execute(f"""
+                    SELECT COUNT(*),
+                           ROUND(AVG(unit_price_wan_ping), 2),
+                           ROUND(AVG(total_price_wan), 1),
+                           MIN(trade_date),
+                           MAX(trade_date)
+                    FROM transactions
+                    WHERE {kw_where} AND is_special_trade = 0
+                """, kw_params)
+                row = cur.fetchone()
+                total_tx = row[0] if row else 0
+                avg_unit_price = row[1] if row else 0.0
+                avg_total_price = row[2] if row else 0.0
+                min_date = row[3] if row else None
+                max_date = row[4] if row else None
 
         sample_query = f"""
             SELECT id, trade_date, trade_quarter, county_name, district, full_district,
@@ -1493,6 +1540,7 @@ def search_and_locate(q: str = Query(..., min_length=1)):
 
         if sample_rows:
             first_tx = sample_rows[0]
+            latest_quarter = first_tx.get("trade_quarter")
             target_district = first_tx.get("full_district") or ""
             target_road = first_tx.get("road") or ""
             proj = first_tx.get("project_name") or ""
@@ -1587,6 +1635,7 @@ def search_and_locate(q: str = Query(..., min_length=1)):
         "total_tx": total_tx,
         "avg_unit_price": avg_unit_price,
         "avg_total_price": avg_total_price,
+        "latest_quarter": latest_quarter,
         "date_range": f"{min_date} ~ {max_date}" if min_date else None,
         "location": {
             "lat": lat,

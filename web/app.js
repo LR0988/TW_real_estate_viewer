@@ -1905,18 +1905,29 @@ async function fetchAndRenderTransactions(period, region, road, project, door) {
   const sort = document.getElementById('tx-sort-select').value;
   const ageFilter = document.getElementById('tx-filter-age') ? document.getElementById('tx-filter-age').value : 'all';
   const chkAllTime = document.getElementById('chk-tx-all-time');
-  const isAllTime = chkAllTime && chkAllTime.checked;
+  let isAllTime = chkAllTime && chkAllTime.checked;
+  if (keyword && !isAllTime && chkAllTime) {
+    chkAllTime.checked = true;
+    isAllTime = true;
+  }
   const chkSpecial = document.getElementById('tx-filter-special');
   const excludeSpecial = chkSpecial ? chkSpecial.checked : false;
   const tbody = document.getElementById('tx-table-body');
   tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-400">載入明細中...</td></tr>';
 
+  // If the user typed a full address/district/road keyword, do not restrict to stale region/road/project/door
+  const kwHasOwnLocation = keyword && /[市縣區鄉鎮路街大道段號]/.test(keyword);
+  const effRegion = kwHasOwnLocation ? null : region;
+  const effRoad = kwHasOwnLocation ? null : road;
+  const effProject = kwHasOwnLocation ? null : project;
+  const effDoor = kwHasOwnLocation ? null : door;
+
   const timeQuery = isAllTime ? '&period=all' : getTimeParams();
   let url = `/api/transactions?limit=100&sort_by=${sort}${timeQuery}${excludeSpecial ? '&exclude_special=true' : ''}`;
-  if (region) url += `&region=${encodeURIComponent(region)}`;
-  if (road) url += `&road=${encodeURIComponent(road)}`;
-  if (project) url += `&project=${encodeURIComponent(project)}`;
-  if (door) url += `&door=${encodeURIComponent(door)}`;
+  if (effRegion) url += `&region=${encodeURIComponent(effRegion)}`;
+  if (effRoad) url += `&road=${encodeURIComponent(effRoad)}`;
+  if (effProject) url += `&project=${encodeURIComponent(effProject)}`;
+  if (effDoor) url += `&door=${encodeURIComponent(effDoor)}`;
   if (keyword) url += `&keyword=${encodeURIComponent(keyword)}`;
 
   if (ageFilter === '0-5') url += '&min_age=0&max_age=5';
@@ -1991,12 +2002,16 @@ async function fetchAndRenderTransactions(period, region, road, project, door) {
         ? `<div class="mt-0.5"><span class="inline-block px-1.5 py-0.5 rounded text-[10px] bg-sky-500/20 text-sky-300 border border-sky-500/30 font-medium">🚗 含車位${bCat ? ` (${bCat})` : ''}${it.berth_area_ping > 0 ? ` · ${it.berth_area_ping}坪` : ''}</span></div>`
         : `<div class="mt-0.5"><span class="inline-block px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700/60">無車位</span></div>`;
 
+      const safeAddr = (it.address || `${it.full_district || ''}${it.road || ''}`).replace(/'/g, "\\'");
+      const locateBtn = `<button onclick="event.stopPropagation(); locateAddressOnMap('${safeAddr}')" title="在地圖上定位此門牌位置" class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] bg-blue-500/20 hover:bg-blue-500/35 text-blue-300 border border-blue-500/30 ml-1 cursor-pointer transition">📍 地圖定位</button>`;
+
       tr.innerHTML = `
         <td class="py-2.5 text-slate-400 font-mono">${it.trade_date || '--'}</td>
         <td class="py-2.5">
           <div class="font-medium text-slate-100 flex items-center flex-wrap">
             <span>${it.full_district} ${it.road || ''}</span>
             ${projTag}
+            ${locateBtn}
             ${specialTag}
           </div>
           <div class="text-[11px] text-slate-300 font-mono truncate max-w-xs">${it.address || ''}</div>
@@ -2544,81 +2559,136 @@ function bindEvents() {
   const globalSearchInput = document.getElementById('global-search-input');
   const globalSearchBtn = document.getElementById('btn-global-search');
 
-  async function handleGlobalSearch() {
-    const query = globalSearchInput ? globalSearchInput.value.trim() : '';
-    if (!query) {
+  async function handleGlobalSearch(customQuery = null) {
+    const rawQ = (typeof customQuery === 'string' && customQuery.trim())
+      ? customQuery.trim()
+      : (globalSearchInput ? globalSearchInput.value.trim() : '');
+    if (!rawQ) {
       showToast('請輸入地址、門牌或建案名稱');
       return;
     }
-    showToast(`🔍 正在精確搜尋與定位：${query}...`);
+    showToast(`🔍 正在精確搜尋與定位：${rawQ}...`);
 
     try {
-      const res = await apiFetch(`/api/search/locate?q=${encodeURIComponent(query)}`);
+      const res = await apiFetch(`/api/search/locate?q=${encodeURIComponent(rawQ)}`);
       const data = await res.json();
       if (!data.found && data.total_tx === 0) {
-        showToast(`查無符合「${query}」之交易或地理位置`);
+        showToast(`查無符合「${rawQ}」之交易或地理位置`);
         return;
       }
 
       const loc = data.location || {};
-      const normQuery = data.query || query;
+      const normQuery = data.query || rawQ;
       if (globalSearchInput && data.query) {
         globalSearchInput.value = data.query;
       }
-      if (loc.lat && loc.lng) {
-        if (STATE.map) {
-          STATE.map.flyTo([loc.lat, loc.lng], 17, { animate: true, duration: 1.2 });
-          if (STATE.searchMarker) {
-            STATE.map.removeLayer(STATE.searchMarker);
-          }
-          const pulseIcon = L.divIcon({
-            className: 'search-pulse-icon',
-            html: `<div class="relative flex items-center justify-center">
-                     <div class="animate-ping absolute w-8 h-8 rounded-full bg-blue-400 opacity-75"></div>
-                     <div class="w-6 h-6 rounded-full bg-blue-600 border-2 border-white shadow-xl flex items-center justify-center text-xs text-white font-bold cursor-pointer">📍</div>
-                   </div>`,
-            iconSize: [24, 24],
-            iconAnchor: [12, 12]
-          });
-          const sDist = (loc.full_district || '').replace(/'/g, "\\'");
-          const sProj = (loc.project_name || '').replace(/'/g, "\\'");
-          const sSpot = (loc.spot_name || loc.name || normQuery).replace(/'/g, "\\'");
-          const sRoad = (loc.road || '').replace(/'/g, "\\'");
-          const sQ = normQuery.replace(/'/g, "\\'");
-          const projLine = loc.project_name
-            ? `<div class="text-amber-300 text-xs font-semibold mt-0.5">🏢 建案：${loc.project_name}</div>`
-            : '';
-          STATE.searchMarker = L.marker([loc.lat, loc.lng], { icon: pulseIcon }).addTo(STATE.map);
-          STATE.searchMarker.bindPopup(`
-            <div class="p-1.5 text-xs min-w-[215px]">
-              <div class="font-bold text-sm text-white">${loc.name || normQuery}</div>
-              ${projLine}
-              <div class="text-slate-300 text-[11px] mt-0.5">${loc.full_district || ''} ${loc.road || ''}</div>
-              <div class="text-emerald-400 font-semibold mt-1">均價: ${data.avg_unit_price} 萬/坪 | 成交: ${data.total_tx} 筆</div>
-              <div class="mt-2 flex flex-col gap-1.5">
-                <button onclick="openCommunityTrendModal('${sDist}', '${sProj}', '${sSpot}', '${sRoad}', '')" 
-                  class="w-full py-1 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded text-[11px] font-semibold transition">
-                  📈 建案行情與轉手獲利
-                </button>
-                <button onclick="openTransactionDrawer('全部歷史', '${sDist}', '${sRoad}', null, null, '${sQ}')" 
-                  class="w-full py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px] font-medium transition">
-                  查看全歷史成交明細 &rarr;
-                </button>
-              </div>
-            </div>
-          `).openPopup();
+
+      // Close any open modals so the map and marker popup are clearly visible
+      const txModalEl = document.getElementById('tx-modal');
+      if (txModalEl) txModalEl.classList.add('hidden');
+      const ctModalEl = document.getElementById('community-trend-modal');
+      if (ctModalEl) ctModalEl.classList.add('hidden');
+
+      // Switch map level to 'road' (細分: 路段/建案) so polygons don't cover the building
+      if (STATE.activeLevel !== 'road') {
+        STATE.activeLevel = 'road';
+        document.querySelectorAll('.level-btn').forEach(b => {
+          const isRoad = b.dataset.level === 'road';
+          b.classList.toggle('active', isRoad);
+          b.classList.toggle('text-slate-400', !isRoad);
+        });
+        const hotspotSubBar = document.getElementById('hotspot-sub-controls');
+        if (hotspotSubBar) hotspotSubBar.classList.remove('hidden');
+      }
+
+      // If in single-quarter mode and the searched address's latest transaction is in another quarter, sync timeline to that quarter so its hotspot dot also renders on map
+      if (data.latest_quarter && STATE.timeMode === 'single' && Array.isArray(STATE.periods)) {
+        const qIdx = STATE.periods.indexOf(data.latest_quarter);
+        if (qIdx >= 0 && qIdx !== STATE.currentIndex) {
+          STATE.currentIndex = qIdx;
+          const pSlider = document.getElementById('period-slider');
+          if (pSlider) pSlider.value = qIdx;
+          updatePeriodDisplay();
         }
       }
 
-      // Automatically open drawer in All-Time mode with normalized search keyword!
-      openTransactionDrawer('全部歷史', loc.full_district || null, loc.road || null, null, null, normQuery);
-      showToast(`📍 已精準定位至：${loc.name || normQuery} (共 ${data.total_tx} 筆歷史成交)`);
+      await updateView();
+
+      if (loc.lat && loc.lng && STATE.map) {
+        if (STATE.searchMarker) {
+          STATE.map.removeLayer(STATE.searchMarker);
+        }
+        const pulseIcon = L.divIcon({
+          className: 'search-pulse-icon',
+          html: `<div class="relative flex items-center justify-center">
+                   <div class="animate-ping absolute w-9 h-9 rounded-full bg-amber-400 opacity-75"></div>
+                   <div class="w-7 h-7 rounded-full bg-blue-600 border-2 border-white shadow-xl flex items-center justify-center text-xs text-white font-bold cursor-pointer">📍</div>
+                 </div>`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14]
+        });
+        const sDist = (loc.full_district || '').replace(/'/g, "\\'");
+        const sProj = (loc.project_name || '').replace(/'/g, "\\'");
+        const sSpot = (loc.spot_name || loc.name || normQuery).replace(/'/g, "\\'");
+        const sRoad = (loc.road || '').replace(/'/g, "\\'");
+        const sQ = normQuery.replace(/'/g, "\\'");
+        const projLine = loc.project_name
+          ? `<div class="text-amber-300 text-xs font-semibold mt-0.5">🏢 建案：${loc.project_name}</div>`
+          : '';
+
+        const firstTx = (data.transactions && data.transactions.length > 0) ? data.transactions[0] : null;
+        let txDetailHtml = '';
+        if (firstTx) {
+          const flShow = firstTx.floor_display || firstTx.floor || '--';
+          const ageShow = (firstTx.building_age !== null && firstTx.building_age !== undefined) ? `屋齡 ${firstTx.building_age}年` : '';
+          txDetailHtml = `
+            <div class="mt-1.5 pt-1.5 border-t border-slate-700/80 text-[11px] text-slate-200 space-y-0.5">
+              <div class="font-mono text-amber-200">${firstTx.address || loc.address || ''}</div>
+              <div>樓層: <b>${flShow} / 共${firstTx.total_floors || '--'}</b> ${ageShow ? `｜ ${ageShow}` : ''}</div>
+              <div>移轉建坪: <b class="text-emerald-300">${firstTx.building_area_ping || 0} 坪</b> ｜ 土地: <b class="text-amber-300">${firstTx.land_area_ping || 0} 坪</b></div>
+              <div>最近成交 (${firstTx.trade_date || firstTx.trade_quarter || ''}): <b class="text-white">${(firstTx.total_price_wan || 0).toLocaleString()} 萬</b> <span class="text-emerald-400">(${firstTx.unit_price_wan_ping} 萬/坪)</span></div>
+            </div>
+          `;
+        }
+
+        STATE.searchMarker = L.marker([loc.lat, loc.lng], { icon: pulseIcon, zIndexOffset: 1000 }).addTo(STATE.map);
+        STATE.searchMarker.bindPopup(`
+          <div class="p-1.5 text-xs min-w-[245px]">
+            <div class="font-bold text-sm text-white">${loc.name || normQuery}</div>
+            ${projLine}
+            <div class="text-slate-300 text-[11px] mt-0.5">${loc.full_district || ''} ${loc.road || ''}</div>
+            <div class="text-emerald-400 font-semibold mt-1">歷史均價: ${data.avg_unit_price} 萬/坪 | 累計成交: ${data.total_tx} 筆</div>
+            ${txDetailHtml}
+            <div class="mt-2.5 flex flex-col gap-1.5">
+              <button onclick="openCommunityTrendModal('${sDist}', '${sProj}', '${sSpot}', '${sRoad}', '')" 
+                class="w-full py-1.5 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded text-[11px] font-semibold transition shadow">
+                📈 建案行情與細項 (含土地/建坪/歷年紀錄)
+              </button>
+              <button onclick="openTransactionDrawer('全部歷史', '${sDist}', '${sRoad}', null, null, '${sQ}')" 
+                class="w-full py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px] font-medium transition shadow">
+                📋 查看全歷史成交明細 (${data.total_tx}筆) &rarr;
+              </button>
+            </div>
+          </div>
+        `, { maxWidth: 320, autoPan: true });
+
+        STATE.map.flyTo([loc.lat, loc.lng], 17, { animate: true, duration: 1.0 });
+        STATE.searchMarker.openPopup();
+        STATE.map.once('moveend', () => {
+          if (STATE.searchMarker) {
+            STATE.searchMarker.openPopup();
+          }
+        });
+      }
+
+      showToast(`📍 已在地圖精準定位：${loc.name || normQuery} (共 ${data.total_tx} 筆歷史成交)`);
 
     } catch (err) {
       console.error('Search locate failed:', err);
       showToast('搜尋定位請求失敗');
     }
   }
+  window.locateAddressOnMap = handleGlobalSearch;
 
   if (globalSearchInput) {
     globalSearchInput.addEventListener('keyup', (e) => {
@@ -3043,13 +3113,18 @@ async function openCommunityTrendModal(region, projectName, spotName, road = '',
           histBadge = `<span class="inline-block px-2 py-0.5 rounded-full text-[10px] bg-slate-800 group-hover:bg-slate-700 text-slate-300 border border-slate-700 transition">🔎 歷年紀錄 (1筆) ▾</span>`;
         }
 
+        const safeAddr = (it.address || `${region || ''}${it.road_door || ''}`).replace(/'/g, "\\'");
+
         tr.innerHTML = `
           <td class="py-2.5 font-mono text-slate-300">
             <div>${it.trade_date || '--'}</div>
             <div class="text-[10px] text-slate-500">${it.trade_quarter || ''}</div>
           </td>
           <td class="py-2.5">
-            <div class="font-semibold text-white font-mono">${it.address || it.road_door || '--'}</div>
+            <div class="font-semibold text-white font-mono flex items-center gap-1.5 flex-wrap">
+              <span>${it.address || it.road_door || '--'}</span>
+              <button onclick="event.stopPropagation(); locateAddressOnMap('${safeAddr}')" title="關閉視窗並在地圖上定位此門牌" class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-sans bg-blue-500/20 hover:bg-blue-500/40 text-blue-300 border border-blue-500/30 transition cursor-pointer">📍 地圖</button>
+            </div>
             <div class="text-[11px] text-slate-400 mt-0.5">${flShow} / 共${it.total_floors || '--'} ${ageShow ? `｜ ${ageShow}` : ''}</div>
           </td>
           <td class="py-2.5">
