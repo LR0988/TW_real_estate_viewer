@@ -14,6 +14,7 @@ const STATE = {
   momentumInterval: 'qoq', // 'mom' (月增), 'qoq' (季增), 'yoy' (年增)
   activeLevel: 'county',   // 'county', 'town', 'road'
   hotspotType: 'all',      // 'all', 'road', 'project'
+  hotspotAllHistoryOnZoom: true, // When zoomed into district/street, show all historical doors (2012~present)
   activeAgeFilter: 'all',  // 'all', '0-5', '5-10', '10-20', '20-30', '30-999'
   selectedRegion: null,    // null = national
   activeBasemap: 'dark',   // 'dark', 'streets', 'satellite'
@@ -1062,26 +1063,34 @@ async function updateView() {
 // 5. Render Granular Location Hotspots (Roads & Building Projects) on Map
 async function renderLocationHotspots(geojsonData, period, options = {}) {
   try {
-    const timeLabel = getTimeLabel();
-    const timeParams = getTimeParams();
+    const zoomLvl = STATE.map ? STATE.map.getZoom() : 7.5;
+    const isZoomedIn = zoomLvl >= 11;
+    const isStreetOrDistZoom = zoomLvl >= 12;
+
+    const firstP = (STATE.periods && STATE.periods.length > 0) ? STATE.periods[0] : '2012Q3';
+    const lastP = (STATE.periods && STATE.periods.length > 0) ? STATE.periods[STATE.periods.length - 1] : '2026Q1';
+    const useAllHist = Boolean(STATE.hotspotAllHistoryOnZoom && (isStreetOrDistZoom || STATE.selectedRegion));
+
+    const timeLabel = useAllHist ? `${firstP}~${lastP}` : getTimeLabel();
+    const timeParams = useAllHist
+      ? `&start_period=${encodeURIComponent(firstP)}&end_period=${encodeURIComponent(lastP)}`
+      : getTimeParams();
     const ageParams = getAgeParams();
     const hotspotType = STATE.hotspotType || 'all';
     const isIncrementalPan = Boolean(options.incremental);
-    const useViewportBbox = Boolean(options.scanViewport) || (!STATE.selectedRegion && STATE.map && STATE.map.getZoom() >= 11);
 
-    const regionParam = (!options.scanViewport && STATE.selectedRegion)
+    const regionParam = (!options.scanViewport && !isStreetOrDistZoom && STATE.selectedRegion)
       ? `&region=${encodeURIComponent(STATE.selectedRegion)}`
       : '';
 
     let bboxParam = '';
-    const isZoomedIn = STATE.map && STATE.map.getZoom() >= 11;
-    if (useViewportBbox && isZoomedIn) {
+    if (isZoomedIn && STATE.map) {
       const b = STATE.map.getBounds();
       bboxParam = `&min_lat=${b.getSouth().toFixed(4)}&max_lat=${b.getNorth().toFixed(4)}&min_lng=${b.getWest().toFixed(4)}&max_lng=${b.getEast().toFixed(4)}`;
     }
 
     // Signature of analytical/visual settings; only clear existing points when these settings change
-    const filterSig = `${timeParams}|${ageParams}|${STATE.activeMetric}|${hotspotType}|${STATE.colorConfig.palette}|${STATE.colorConfig.currentMin}|${STATE.colorConfig.currentMax}|${STATE.momentumType}|${STATE.momentumInterval}`;
+    const filterSig = `${timeParams}|${ageParams}|${STATE.activeMetric}|${hotspotType}|${STATE.colorConfig.palette}|${STATE.colorConfig.currentMin}|${STATE.colorConfig.currentMax}|${STATE.momentumType}|${STATE.momentumInterval}|${useAllHist}`;
     const shouldResetLayer = Boolean(options.forceReset) || (!isIncrementalPan && filterSig !== STATE.hotspotFilterSignature);
 
     // When region is selected or map is zoomed in, fetch all unmerged distinct addresses (no truncation!)
@@ -2280,12 +2289,23 @@ function bindEvents() {
       STATE.hotspotType = btn.dataset.type || 'all';
       if (STATE.activeLevel === 'road') {
         const currentPeriod = STATE.periods[STATE.currentIndex];
-        renderLocationHotspots(null, currentPeriod);
+        renderLocationHotspots(null, currentPeriod, { forceReset: true });
       } else {
         updateView();
       }
     });
   });
+
+  const chkHotspotAllHist = document.getElementById('chk-hotspot-all-history');
+  if (chkHotspotAllHist) {
+    chkHotspotAllHist.addEventListener('change', (e) => {
+      STATE.hotspotAllHistoryOnZoom = e.target.checked;
+      if (STATE.activeLevel === 'road') {
+        renderLocationHotspots(null, null, { forceReset: true, scanViewport: true });
+      }
+      showToast(e.target.checked ? '已啟用：放大顯示 2012~至今歷年全部成交門牌' : '已切換：僅顯示當前時間軸週期之成交門牌');
+    });
+  }
 
   // Basemap style buttons (dark / streets / satellite)
   document.querySelectorAll('.basemap-btn').forEach(btn => {

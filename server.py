@@ -1698,10 +1698,12 @@ def get_location_hotspots(
         clean_reg = region.replace("臺", "台")
         is_county = any(clean_reg.endswith(x) for x in ["市", "縣"]) and not any(x in clean_reg for x in ["區", "鄉", "鎮", "市區"])
 
-    # Determine if viewport bounding box narrows down visible districts when region is not selected
+    # Determine if viewport bounding box is zoomed in enough for exact coordinate-bounded SQL query
+    has_bbox = (min_lat is not None and max_lat is not None and min_lng is not None and max_lng is not None)
+    use_exact_bbox = has_bbox and (max_lat - min_lat) < 0.35 and (max_lng - min_lng) < 0.35
+
     viewport_districts = []
-    if not region and min_lat is not None and max_lat is not None and min_lng is not None and max_lng is not None:
-        # Only apply viewport full-detail expansion when zoomed into a regional/city area (lat span < 1.2 deg)
+    if not region and has_bbox and not use_exact_bbox:
         if (max_lat - min_lat) < 1.25 and (max_lng - min_lng) < 1.25:
             centroids = get_town_centroids()
             pad = 0.08
@@ -1711,77 +1713,140 @@ def get_location_hotspots(
                     if (min_lat - pad) <= c_lat <= (max_lat + pad) and (min_lng - pad) <= c_lng <= (max_lng + pad):
                         viewport_districts.append(dist_name)
 
-    use_preagg = (min_age is None and max_age is None)
+    where_agg = ["1=1"]
+    params_agg = []
+    is_range = bool(start_period and end_period and start_period != end_period)
 
-    if use_preagg:
-        where_agg = ["1=1"]
-        params_agg = []
-        is_range = bool(start_period and end_period and start_period != end_period)
+    if is_range:
+        where_agg.append("a.period >= ? AND a.period <= ?")
+        params_agg.extend([start_period, end_period])
+    elif period or start_period:
+        where_agg.append("a.period = ?")
+        params_agg.append(period or start_period)
 
-        if is_range:
-            where_agg.append("period >= ? AND period <= ?")
-            params_agg.extend([start_period, end_period])
-        elif period or start_period:
-            where_agg.append("period = ?")
-            params_agg.append(period or start_period)
+    if min_age is not None:
+        where_agg.append("a.avg_age >= ?")
+        params_agg.append(min_age)
+    if max_age is not None:
+        where_agg.append("a.avg_age <= ?")
+        params_agg.append(max_age)
 
-        if region:
-            if is_county:
-                where_agg.append("county_name = ?")
-                params_agg.append(region)
-            else:
-                where_agg.append("full_district = ?")
-                params_agg.append(region)
-        elif viewport_districts:
-            placeholders = ",".join("?" for _ in viewport_districts)
-            where_agg.append(f"full_district IN ({placeholders})")
-            params_agg.extend(viewport_districts)
+    if region:
+        if is_county:
+            where_agg.append("a.county_name = ?")
+            params_agg.append(region)
+        else:
+            where_agg.append("a.full_district = ?")
+            params_agg.append(region)
+    elif viewport_districts:
+        placeholders = ",".join("?" for _ in viewport_districts)
+        where_agg.append(f"a.full_district IN ({placeholders})")
+        params_agg.extend(viewport_districts)
 
-        if type == "road":
-            where_agg.append("spot_type != 'project'")
-        elif type == "project":
-            where_agg.append("spot_type = 'project'")
+    if type == "road":
+        where_agg.append("a.spot_type != 'project'")
+    elif type == "project":
+        where_agg.append("a.spot_type = 'project'")
 
+    if use_exact_bbox:
+        pad_deg = 0.002
+        bbox_params = [min_lat - pad_deg, max_lat + pad_deg, min_lng - pad_deg, max_lng + pad_deg]
+        fetch_limit = limit if limit is not None else 4500
+        if not is_range:
+            query = f"""
+                WITH InBbox AS (
+                    SELECT DISTINCT full_district, name
+                    FROM location_coordinates INDEXED BY idx_loc_lat_lng
+                    WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?
+                )
+                SELECT a.spot_name as name, a.spot_type as type, a.road, a.door_addr, a.project_name,
+                       a.full_district, a.county_name, a.district,
+                       a.tx_count, a.avg_unit_price, a.avg_total_price,
+                       a.min_unit_price, a.max_unit_price, a.building_type,
+                       a.avg_age, a.build_year, a.avg_building_ping, a.avg_land_ping,
+                       a.has_parking_count, a.berth_type
+                FROM InBbox b
+                JOIN agg_spot_quarter a ON a.full_district = b.full_district AND a.spot_name = b.name
+                WHERE {" AND ".join(where_agg)}
+                ORDER BY a.tx_count DESC
+                LIMIT ?
+            """
+        else:
+            query = f"""
+                WITH InBbox AS (
+                    SELECT DISTINCT full_district, name
+                    FROM location_coordinates INDEXED BY idx_loc_lat_lng
+                    WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?
+                )
+                SELECT a.spot_name as name,
+                       MAX(a.spot_type) as type,
+                       MAX(a.road) as road,
+                       MAX(a.door_addr) as door_addr,
+                       MAX(a.project_name) as project_name,
+                       a.full_district,
+                       MAX(a.county_name) as county_name,
+                       MAX(a.district) as district,
+                       SUM(a.tx_count) as tx_count,
+                       ROUND(SUM(a.avg_unit_price * a.tx_count) / NULLIF(SUM(a.tx_count), 0), 2) as avg_unit_price,
+                       ROUND(SUM(a.avg_total_price * a.tx_count) / NULLIF(SUM(a.tx_count), 0), 1) as avg_total_price,
+                       ROUND(MIN(a.min_unit_price), 2) as min_unit_price,
+                       ROUND(MAX(a.max_unit_price), 2) as max_unit_price,
+                       MAX(a.building_type) as building_type,
+                       ROUND(AVG(a.avg_age), 1) as avg_age,
+                       MAX(a.build_year) as build_year,
+                       ROUND(SUM(a.avg_building_ping * a.tx_count) / NULLIF(SUM(a.tx_count), 0), 2) as avg_building_ping,
+                       ROUND(SUM(a.avg_land_ping * a.tx_count) / NULLIF(SUM(a.tx_count), 0), 2) as avg_land_ping,
+                       SUM(a.has_parking_count) as has_parking_count,
+                       MAX(a.berth_type) as berth_type
+                FROM InBbox b
+                JOIN agg_spot_quarter a ON a.full_district = b.full_district AND a.spot_name = b.name
+                WHERE {" AND ".join(where_agg)}
+                GROUP BY a.full_district, a.spot_name
+                ORDER BY tx_count DESC
+                LIMIT ?
+            """
+        params = bbox_params + params_agg + [fetch_limit]
+    else:
         # When zoomed out to nationwide overview, pre-filter out 1-tx individual doors before window ranking
         if not region and not viewport_districts:
-            where_agg.append("(spot_type = 'project' OR tx_count >= 2)")
+            where_agg.append("(a.spot_type = 'project' OR a.tx_count >= 2)")
 
         if not is_range:
             base_cte = f"""
-                SELECT spot_name as spot, spot_type, road, door_addr, project_name,
-                       full_district, county_name, district,
-                       tx_count, avg_unit_price, avg_total_price,
-                       min_unit_price, max_unit_price, building_type,
-                       avg_age, build_year, avg_building_ping, avg_land_ping,
-                       has_parking_count, berth_type
-                FROM agg_spot_quarter
+                SELECT a.spot_name as spot, a.spot_type, a.road, a.door_addr, a.project_name,
+                       a.full_district, a.county_name, a.district,
+                       a.tx_count, a.avg_unit_price, a.avg_total_price,
+                       a.min_unit_price, a.max_unit_price, a.building_type,
+                       a.avg_age, a.build_year, a.avg_building_ping, a.avg_land_ping,
+                       a.has_parking_count, a.berth_type
+                FROM agg_spot_quarter a
                 WHERE {" AND ".join(where_agg)}
             """
         else:
             base_cte = f"""
-                SELECT spot_name as spot,
-                       MAX(spot_type) as spot_type,
-                       MAX(road) as road,
-                       MAX(door_addr) as door_addr,
-                       MAX(project_name) as project_name,
-                       full_district,
-                       MAX(county_name) as county_name,
-                       MAX(district) as district,
-                       SUM(tx_count) as tx_count,
-                       ROUND(SUM(avg_unit_price * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_unit_price,
-                       ROUND(SUM(avg_total_price * tx_count) / NULLIF(SUM(tx_count), 0), 1) as avg_total_price,
-                       ROUND(MIN(min_unit_price), 2) as min_unit_price,
-                       ROUND(MAX(max_unit_price), 2) as max_unit_price,
-                       MAX(building_type) as building_type,
-                       ROUND(AVG(avg_age), 1) as avg_age,
-                       MAX(build_year) as build_year,
-                       ROUND(SUM(avg_building_ping * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_building_ping,
-                       ROUND(SUM(avg_land_ping * tx_count) / NULLIF(SUM(tx_count), 0), 2) as avg_land_ping,
-                       SUM(has_parking_count) as has_parking_count,
-                       MAX(berth_type) as berth_type
-                FROM agg_spot_quarter
+                SELECT a.spot_name as spot,
+                       MAX(a.spot_type) as spot_type,
+                       MAX(a.road) as road,
+                       MAX(a.door_addr) as door_addr,
+                       MAX(a.project_name) as project_name,
+                       a.full_district,
+                       MAX(a.county_name) as county_name,
+                       MAX(a.district) as district,
+                       SUM(a.tx_count) as tx_count,
+                       ROUND(SUM(a.avg_unit_price * a.tx_count) / NULLIF(SUM(a.tx_count), 0), 2) as avg_unit_price,
+                       ROUND(SUM(a.avg_total_price * a.tx_count) / NULLIF(SUM(a.tx_count), 0), 1) as avg_total_price,
+                       ROUND(MIN(a.min_unit_price), 2) as min_unit_price,
+                       ROUND(MAX(a.max_unit_price), 2) as max_unit_price,
+                       MAX(a.building_type) as building_type,
+                       ROUND(AVG(a.avg_age), 1) as avg_age,
+                       MAX(a.build_year) as build_year,
+                       ROUND(SUM(a.avg_building_ping * a.tx_count) / NULLIF(SUM(a.tx_count), 0), 2) as avg_building_ping,
+                       ROUND(SUM(a.avg_land_ping * a.tx_count) / NULLIF(SUM(a.tx_count), 0), 2) as avg_land_ping,
+                       SUM(a.has_parking_count) as has_parking_count,
+                       MAX(a.berth_type) as berth_type
+                FROM agg_spot_quarter a
                 WHERE {" AND ".join(where_agg)}
-                GROUP BY full_district, spot_name
+                GROUP BY a.full_district, a.spot_name
             """
 
         if not region and not viewport_districts:
@@ -1803,7 +1868,6 @@ def get_location_hotspots(
             """
             params = params_agg + [fetch_limit]
         else:
-            # Region selected (County or District) OR zoomed-in viewport: return ALL unmerged spots without truncation!
             fetch_limit = limit if limit is not None else 4500
             query = f"""
                 WITH AggSpots AS ({base_cte})
@@ -1816,75 +1880,6 @@ def get_location_hotspots(
                 LIMIT ?
             """
             params = params_agg + [fetch_limit]
-    else:
-        conn.create_function("get_spot_name", 3, extract_spot_name)
-        conn.create_function("get_spot_type", 3, extract_spot_type)
-        where_base = [
-            "trade_year >= 2012",
-            "is_special_trade = 0",
-            "unit_price_wan_ping > 0",
-            "target_type != '土地'",
-            "road NOT LIKE '%--%'",
-            "road NOT LIKE '%?%'"
-        ]
-        params_base = []
-        if start_period and end_period:
-            where_base.append("trade_quarter >= ? AND trade_quarter <= ?")
-            params_base.extend([start_period, end_period])
-        elif period:
-            where_base.append("trade_quarter = ?")
-            params_base.append(period)
-        if region:
-            where_base.append("(county_name = ? OR full_district = ?)")
-            params_base.extend([region, region])
-        if min_age is not None:
-            where_base.append("building_age >= ?")
-            params_base.append(min_age)
-        if max_age is not None:
-            where_base.append("building_age <= ?")
-            params_base.append(max_age)
-        if type == "road":
-            where_base.append("get_spot_type(address, road, project_name) != 'project'")
-        elif type == "project":
-            where_base.append("get_spot_type(address, road, project_name) = 'project'")
-
-        fetch_limit = limit if limit is not None else (4000 if (region and not is_county) else (2000 if is_county else 1500))
-        rn_limit = 8 if not region else (30 if is_county else 99999)
-        query = f"""
-            WITH AggSpots AS (
-                SELECT get_spot_name(address, road, project_name) as spot,
-                       get_spot_type(address, road, project_name) as spot_type,
-                       road, '' as door_addr, project_name, full_district, county_name, district,
-                       COUNT(*) as tx_count,
-                       ROUND(AVG(unit_price_wan_ping), 2) as avg_unit_price,
-                       ROUND(AVG(total_price_wan), 1) as avg_total_price,
-                       ROUND(MIN(unit_price_wan_ping), 2) as min_unit_price,
-                       ROUND(MAX(unit_price_wan_ping), 2) as max_unit_price,
-                       building_type,
-                       ROUND(AVG(building_age), 1) as avg_age,
-                       MAX(build_year) as build_year,
-                       ROUND(AVG(building_area_ping), 2) as avg_building_ping,
-                       ROUND(AVG(land_area_ping), 2) as avg_land_ping,
-                       SUM(CASE WHEN target_type LIKE '%車位%' OR (berth_category IS NOT NULL AND berth_category != '' AND berth_category != 'nan') OR berth_area_ping > 0 THEN 1 ELSE 0 END) as has_parking_count,
-                       MAX(CASE WHEN berth_category IS NOT NULL AND berth_category != '' AND berth_category != 'nan' THEN berth_category ELSE '' END) as berth_type
-                FROM transactions
-                WHERE {" AND ".join(where_base)}
-                GROUP BY full_district, spot
-            ),
-            RankedSpots AS (
-                SELECT *, ROW_NUMBER() OVER(PARTITION BY full_district ORDER BY tx_count DESC) as rn
-                FROM AggSpots
-            )
-            SELECT spot as name, spot_type as type, road, door_addr, project_name,
-                   full_district, county_name, district,
-                   tx_count, avg_unit_price, avg_total_price, min_unit_price, max_unit_price, building_type,
-                   avg_age, build_year, avg_building_ping, avg_land_ping, has_parking_count, berth_type
-            FROM RankedSpots
-            WHERE rn <= {rn_limit}
-            ORDER BY tx_count DESC
-            LIMIT ?
-        """
-        params = list(params_base) + [fetch_limit]
 
     cur.execute(query, params)
     hotspots = [dict(r) for r in cur.fetchall()]

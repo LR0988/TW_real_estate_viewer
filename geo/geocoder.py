@@ -83,6 +83,8 @@ def init_geocoder_db(db_path: Path = DB_PATH):
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_loc_district ON location_coordinates(full_district);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_loc_dist_road ON location_coordinates(full_district, road);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_loc_lat_lng ON location_coordinates(lat, lng, full_district, name);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_loc_dist_name ON location_coordinates(full_district, name);")
         conn.commit()
         conn.close()
         _DB_INIT_DONE = True
@@ -578,14 +580,15 @@ def batch_resolve_coordinates(
         item.pop("_clean_rd", None)
         item.pop("_door_addr", None)
 
-    # Tiny side-by-side separation (8m) ONLY when 2~4 units share the exact same building coordinate
+    # Tiny side-by-side separation (~7m) when multiple doors in an alley share the same geocoded point
     for coord_key, group in coord_groups.items():
-        if 1 < len(group) <= 5:
+        if 1 < len(group) <= 12:
+            n_others = len(group) - 1
             for idx, member in enumerate(group):
                 if idx == 0:
                     continue
-                angle = idx * 2.0944  # 120 deg apart
-                dist_deg = 0.00006
+                angle = (2.0 * math.pi * (idx - 1)) / max(1, n_others)
+                dist_deg = 0.000065 if n_others <= 5 else 0.000085
                 member["lat"] = round(member["lat"] + (math.sin(angle) * dist_deg), 6)
                 member["lng"] = round(member["lng"] + (math.cos(angle) * dist_deg * 1.08), 6)
 
