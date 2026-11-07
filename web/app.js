@@ -24,6 +24,8 @@ const STATE = {
   labelLayer: null,
   geojsonLayer: null,
   markersLayer: null,
+  renderedMarkerKeys: new Set(),
+  hotspotFilterSignature: '',
   chart: null,
   desktopBackendUrl: '',
   colorConfig: {
@@ -458,14 +460,14 @@ function initMap() {
   // Layer group for road and project markers
   STATE.markersLayer = L.layerGroup().addTo(STATE.map);
 
-  // Dynamically load all unmerged spots in the zoomed-in viewport even when dropdown is Nationwide
+  // Dynamically & incrementally load new spots in the panned/zoomed viewport without clearing existing markers
   let moveTimer = null;
   STATE.map.on('moveend', () => {
-    if (STATE.activeLevel !== 'road' || STATE.selectedRegion) return;
+    if (STATE.activeLevel !== 'road') return;
     if (STATE.map.getZoom() < 11) return;
     if (moveTimer) clearTimeout(moveTimer);
     moveTimer = setTimeout(() => {
-      renderLocationHotspots(null);
+      renderLocationHotspots(null, null, { incremental: true, scanViewport: true });
     }, 180);
   });
 }
@@ -882,7 +884,11 @@ async function updateView() {
     if (STATE.geojsonLayer) {
       STATE.map.removeLayer(STATE.geojsonLayer);
     }
-    STATE.markersLayer.clearLayers();
+    if (STATE.activeLevel !== 'road') {
+      STATE.markersLayer.clearLayers();
+      STATE.renderedMarkerKeys.clear();
+      STATE.hotspotFilterSignature = '';
+    }
 
     // Render Polygons
     STATE.geojsonLayer = L.geoJSON(geojsonData, {
@@ -1024,31 +1030,45 @@ async function updateView() {
 }
 
 // 5. Render Granular Location Hotspots (Roads & Building Projects) on Map
-async function renderLocationHotspots(geojsonData, period) {
+async function renderLocationHotspots(geojsonData, period, options = {}) {
   try {
     const timeLabel = getTimeLabel();
+    const timeParams = getTimeParams();
     const ageParams = getAgeParams();
-    const regionParam = STATE.selectedRegion ? `&region=${encodeURIComponent(STATE.selectedRegion)}` : '';
     const hotspotType = STATE.hotspotType || 'all';
+    const isIncrementalPan = Boolean(options.incremental);
+    const useViewportBbox = Boolean(options.scanViewport) || (!STATE.selectedRegion && STATE.map && STATE.map.getZoom() >= 11);
+
+    const regionParam = (!options.scanViewport && STATE.selectedRegion)
+      ? `&region=${encodeURIComponent(STATE.selectedRegion)}`
+      : '';
 
     let bboxParam = '';
     const isZoomedIn = STATE.map && STATE.map.getZoom() >= 11;
-    if (!STATE.selectedRegion && isZoomedIn) {
+    if (useViewportBbox && isZoomedIn) {
       const b = STATE.map.getBounds();
       bboxParam = `&min_lat=${b.getSouth().toFixed(4)}&max_lat=${b.getNorth().toFixed(4)}&min_lng=${b.getWest().toFixed(4)}&max_lng=${b.getEast().toFixed(4)}`;
     }
 
+    // Signature of analytical/visual settings; only clear existing points when these settings change
+    const filterSig = `${timeParams}|${ageParams}|${STATE.activeMetric}|${hotspotType}|${STATE.colorConfig.palette}|${STATE.colorConfig.currentMin}|${STATE.colorConfig.currentMax}|${STATE.momentumType}|${STATE.momentumInterval}`;
+    const shouldResetLayer = Boolean(options.forceReset) || (!isIncrementalPan && filterSig !== STATE.hotspotFilterSignature);
+
     // When region is selected or map is zoomed in, fetch all unmerged distinct addresses (no truncation!)
     const limit = (STATE.selectedRegion || isZoomedIn) ? 4500 : 2500;
-    const url = `/api/locations/hotspots?type=${hotspotType}&limit=${limit}${getTimeParams()}${ageParams}${regionParam}${bboxParam}`;
-
-    if (STATE.markersLayer) {
-      STATE.markersLayer.clearLayers();
-    }
+    const url = `/api/locations/hotspots?type=${hotspotType}&limit=${limit}${timeParams}${ageParams}${regionParam}${bboxParam}`;
 
     const res = await apiFetch(url);
     const data = await res.json();
     const hotspots = data.hotspots || [];
+
+    if (shouldResetLayer) {
+      if (STATE.markersLayer) {
+        STATE.markersLayer.clearLayers();
+      }
+      STATE.renderedMarkerKeys.clear();
+      STATE.hotspotFilterSignature = filterSig;
+    }
 
     if (!hotspots.length) return;
 
@@ -1056,6 +1076,12 @@ async function renderLocationHotspots(geojsonData, period) {
       const lat = item.lat;
       const lng = item.lng;
       if (!lat || !lng) return;
+
+      const spotKey = `${item.full_district || ''}_${item.name || ''}_${item.road || ''}_${item.type || ''}`;
+      if (STATE.renderedMarkerKeys.has(spotKey)) {
+        return; // Already rendered on map — keep existing marker untouched!
+      }
+      STATE.renderedMarkerKeys.add(spotKey);
 
       const isProject = item.type === 'project';
       const isDoor = item.type === 'door';
@@ -2127,6 +2153,7 @@ function bindEvents() {
   document.getElementById('btn-reset-map').addEventListener('click', () => {
     STATE.map.setView([23.7, 120.95], 7.5);
     STATE.selectedRegion = null;
+    STATE.hotspotFilterSignature = '';
     syncRegionDropdowns(null);
     updateView();
   });
@@ -2179,6 +2206,7 @@ function bindEvents() {
   if (resetNationalBtn) {
     resetNationalBtn.addEventListener('click', async () => {
       STATE.selectedRegion = null;
+      STATE.hotspotFilterSignature = '';
       syncRegionDropdowns(null);
       if (STATE.map) STATE.map.setView([23.7, 120.95], 7.5);
       await updateView();
